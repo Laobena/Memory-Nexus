@@ -1,0 +1,39 @@
+[package]
+name = "database-adapters"
+version = "1.0.0"
+edition = "2021"
+description = "Database adapters for SurrealDB and Qdrant - Connection layer only"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+metrics = { workspace = true }
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+
+# Database clients
+surrealdb = { workspace = true }
+qdrant-client = { workspace = true }
+
+# Networking
+reqwest = { workspace = true }
+
+# Resilience
+tokio-retry = { workspace = true }
+backoff = { workspace = true }
+
+# Cache
+moka = { workspace = true }
+
+[dev-dependencies]
+tokio-test = "0.4.4"
+tempfile = "3.14"

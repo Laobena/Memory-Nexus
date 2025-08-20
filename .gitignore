@@ -1,0 +1,33 @@
+# Memory Nexus Original - Ignore entire folder to prevent downloading
+Memory_Nexus/
+
+# Common Rust ignores
+target/
+Cargo.lock
+
+# IDE and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+
+# Docker volumes and data
+*-data/
+
+# Temporary files
+*.tmp
+*.temp
+*.log
+
+# Build artifacts
+*.exe
+*.dll
+*.so
+*.dylib

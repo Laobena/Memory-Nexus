@@ -1,0 +1,105 @@
+# Memory Nexus v1 - Complete Infrastructure Stack
+# Separate containers for each service like original Memory Nexus
+
+networks:
+  memory-nexus-v1-network:
+    driver: bridge
+
+services:
+  # Memory Nexus v1 Main Application
+  memory-nexus-v1:
+    build:
+      context: .
+      dockerfile: Dockerfile-simple
+    container_name: memory-nexus-v1-app
+    ports:
+      - "8085:8081"  # Different port from test/dev services
+    networks:
+      - memory-nexus-v1-network
+    depends_on:
+      - ollama-v1
+      - qdrant-v1
+      - surrealdb-v1
+    environment:
+      - OLLAMA_URL=http://memory-nexus-v1-ollama:11434
+      - QDRANT_URL=http://memory-nexus-v1-qdrant:6333
+      - SURREALDB_URL=http://memory-nexus-v1-surrealdb:8000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Ollama AI Service for Memory Nexus v1
+  ollama-v1:
+    image: ollama/ollama:latest
+    container_name: memory-nexus-v1-ollama
+    ports:
+      - "11440:11434"  # Unique external port
+    networks:
+      - memory-nexus-v1-network
+    volumes:
+      - ollama-v1-data:/root/.ollama
+    environment:
+      - OLLAMA_ORIGINS=*
+      - OLLAMA_HOST=0.0.0.0
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  # Qdrant Vector Database for Memory Nexus v1
+  qdrant-v1:
+    image: qdrant/qdrant:latest
+    container_name: memory-nexus-v1-qdrant
+    ports:
+      - "6341:6333"  # HTTP API
+      - "6342:6334"  # gRPC API
+    networks:
+      - memory-nexus-v1-network
+    volumes:
+      - qdrant-v1-data:/qdrant/storage
+    environment:
+      - QDRANT__SERVICE__HTTP_PORT=6333
+      - QDRANT__SERVICE__GRPC_PORT=6334
+      - QDRANT__LOG_LEVEL=INFO
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # SurrealDB Graph Database for Memory Nexus v1
+  surrealdb-v1:
+    image: surrealdb/surrealdb:latest
+    container_name: memory-nexus-v1-surrealdb
+    command: start --log trace --user root --pass root memory --bind 0.0.0.0:8000
+    ports:
+      - "8005:8000"  # Unique external port
+    networks:
+      - memory-nexus-v1-network
+    volumes:
+      - surrealdb-v1-data:/data
+    environment:
+      - SURREAL_LOG=trace
+      - SURREAL_USER=root
+      - SURREAL_PASS=root
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  ollama-v1-data:
+    driver: local
+  qdrant-v1-data:
+    driver: local
+  surrealdb-v1-data:
+    driver: local

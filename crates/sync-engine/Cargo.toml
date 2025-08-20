@@ -1,0 +1,28 @@
+[package]
+name = "sync-engine"
+version = "1.0.0"
+edition = "2021"
+description = "Sync engine for coordinating between SurrealDB and Qdrant"
+
+[dependencies]
+# Workspace dependencies
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+async-trait = { workspace = true }
+futures = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+chrono = { workspace = true }
+tracing = { workspace = true }
+
+# Resilience
+tokio-retry = { workspace = true }
+backoff = { workspace = true }
+
+# Dependencies from parent
+database-adapters = { path = "../database-adapters" }
+
+[dev-dependencies]
+tokio-test = "0.4.4"
