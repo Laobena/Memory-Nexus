@@ -17,7 +17,7 @@ use uuid::Uuid;
 
 // Internal imports
 use crate::ai::{AIError, LocalAIEngine};
-use crate::search::similarity::cosine_similarity_optimized;
+use crate::math::cosine_similarity;
 
 /// Errors related to dense vector generation
 #[derive(Error, Debug)]

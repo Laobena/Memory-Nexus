@@ -10,7 +10,7 @@ services:
   memory-nexus-v1:
     build:
       context: .
-      dockerfile: Dockerfile-simple
+      dockerfile: Dockerfile
     container_name: memory-nexus-v1-app
     ports:
       - "8085:8081"  # Different port from test/dev services
@@ -45,12 +45,11 @@ services:
       - OLLAMA_ORIGINS=*
       - OLLAMA_HOST=0.0.0.0
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 60s
+    # Disable health check - Ollama image lacks curl/wget
+    # The app verifies connectivity directly
+    # healthcheck:
+    #   test: ["CMD", "echo", "Ollama health check disabled"]
+    #   interval: 30s
 
   # Qdrant Vector Database for Memory Nexus v1
   qdrant-v1:
@@ -68,11 +67,13 @@ services:
       - QDRANT__SERVICE__GRPC_PORT=6334
       - QDRANT__LOG_LEVEL=INFO
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # Disable health check since Qdrant image has no curl/wget/nc
+    # The app can still check connectivity directly
+    # healthcheck:
+    #   test: ["CMD", "echo", "Qdrant has no health check tools"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
 
   # SurrealDB Graph Database for Memory Nexus v1
   surrealdb-v1:
@@ -90,11 +91,11 @@ services:
       - SURREAL_USER=root
       - SURREAL_PASS=root
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    # Disable health check - SurrealDB image lacks standard tools
+    # The app verifies connectivity directly
+    # healthcheck:
+    #   test: ["CMD", "echo", "SurrealDB health check disabled"]
+    #   interval: 30s
 
 volumes:
   ollama-v1-data:

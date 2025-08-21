@@ -1,27 +1,40 @@
 //! Local AI Engine using Ollama for embedding generation
 //!
 //! Provides 100% local AI processing with aggressive caching for <50ms performance.
-//!
-//! Note: On Windows, this uses a mock implementation to avoid build script issues.
-//! Full Ollama HTTP integration available on Linux/Docker environments.
 
 use super::{AIError, AIResult};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
+
+/// Request structure for Ollama embedding API
+#[derive(Serialize)]
+struct EmbeddingRequest {
+    model: String,
+    input: Vec<String>,
+}
+
+/// Response structure from Ollama embedding API
+#[derive(Deserialize)]
+struct EmbeddingResponse {
+    embeddings: Vec<Vec<f32>>,
+}
 
 /// Local AI Engine for embedding generation using Ollama
 pub struct LocalAIEngine {
     /// Model name for embeddings
     model: String,
+    /// Ollama API base URL
+    api_url: String,
+    /// HTTP client
+    client: reqwest::Client,
     /// Embedding cache: content_hash -> embedding
     embedding_cache: Arc<Mutex<HashMap<String, Vec<f32>>>>,
     /// Cache hit counter
     cache_hits: Arc<Mutex<u64>>,
     /// Cache miss counter
     cache_misses: Arc<Mutex<u64>>,
-    /// Mock mode flag (Windows compatibility)
-    mock_mode: bool,
 }
 
 impl LocalAIEngine {
@@ -35,42 +48,61 @@ impl LocalAIEngine {
     pub async fn new() -> AIResult<Self> {
         let model = std::env::var("OLLAMA_EMBEDDING_MODEL")
             .unwrap_or_else(|_| Self::DEFAULT_MODEL.to_string());
+        
+        let api_url = std::env::var("OLLAMA_API_URL")
+            .unwrap_or_else(|_| "http://localhost:11434".to_string());
 
-        // On Windows, use mock mode to avoid build script dependencies
-        let mock_mode = cfg!(target_os = "windows");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .map_err(|e| AIError::ConnectionError(format!("Failed to create HTTP client: {}", e)))?;
 
         let engine = Self {
             model: model.clone(),
+            api_url,
+            client,
             embedding_cache: Arc::new(Mutex::new(HashMap::new())),
             cache_hits: Arc::new(Mutex::new(0)),
             cache_misses: Arc::new(Mutex::new(0)),
-            mock_mode,
         };
 
-        if mock_mode {
-            println!("✅ LocalAIEngine initialized in MOCK MODE (Windows compatibility)");
-            println!("🤖 Model: {} (simulated)", model);
-            println!("📝 Note: Full Ollama integration available on Linux/Docker");
-        } else {
-            // In production (Linux/Docker), test actual Ollama connection
-            engine.test_connection().await?;
-            println!("✅ LocalAIEngine initialized - Ollama connection verified");
-            println!("🤖 Model: {}", model);
-        }
+        // Test actual Ollama connection
+        engine.test_connection().await?;
+        println!("✅ LocalAIEngine initialized - Ollama connection verified");
+        println!("🤖 Model: {}", model);
 
         Ok(engine)
     }
 
-    /// Test connection to Ollama service (production only)
+    /// Test connection to Ollama service
     async fn test_connection(&self) -> AIResult<()> {
-        // This would be implemented with actual HTTP client in production
-        // For now, simulating connection test
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-
-        // Simulate checking if model is available
-        println!("🔗 Testing Ollama connection...");
+        println!("🔗 Testing Ollama connection at {}...", self.api_url);
+        
+        // Check if Ollama is running by hitting the version endpoint
+        let version_url = format!("{}/api/version", self.api_url);
+        let response = self.client.get(&version_url)
+            .send()
+            .await
+            .map_err(|e| AIError::ConnectionError(format!("Failed to connect to Ollama: {}", e)))?;
+        
+        if !response.status().is_success() {
+            return Err(AIError::ConnectionError(format!(
+                "Ollama returned status: {}",
+                response.status()
+            )));
+        }
+        
+        // Verify model is available by attempting a small embedding
         println!("🤖 Verifying model '{}' availability...", self.model);
-
+        let test_embedding = self.generate_embedding_from_ollama("test").await?;
+        
+        if test_embedding.len() != Self::EXPECTED_EMBEDDING_DIM {
+            return Err(AIError::ModelNotAvailable(format!(
+                "Model {} returned unexpected embedding dimension: {} (expected {})",
+                self.model, test_embedding.len(), Self::EXPECTED_EMBEDDING_DIM
+            )));
+        }
+        
         Ok(())
     }
 
@@ -94,11 +126,7 @@ impl LocalAIEngine {
 
         // Generate new embedding
         *self.cache_misses.lock().unwrap() += 1;
-        let embedding = if self.mock_mode {
-            self.generate_mock_embedding(content).await?
-        } else {
-            self.generate_embedding_from_ollama(content).await?
-        };
+        let embedding = self.generate_embedding_from_ollama(content).await?;
 
         // Cache the result
         self.cache_embedding(content_hash, embedding.clone());
@@ -129,43 +157,43 @@ impl LocalAIEngine {
         Ok(embedding)
     }
 
-    /// Generate mock embedding for Windows compatibility
-    async fn generate_mock_embedding(&self, content: &str) -> AIResult<Vec<f32>> {
-        // Simulate processing time (similar to actual Ollama)
-        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
-
-        // Generate deterministic embedding based on content hash
-        let content_hash = self.hash_content(content);
-        let mut embedding = Vec::with_capacity(Self::EXPECTED_EMBEDDING_DIM);
-
-        // Use content hash as seed for consistent embeddings
-        let seed = u64::from_str_radix(&content_hash[..8], 16).unwrap_or(42);
-        let mut rng_state = seed;
-
-        for _ in 0..Self::EXPECTED_EMBEDDING_DIM {
-            // Simple linear congruential generator for deterministic values
-            rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
-            let normalized = (rng_state as f32) / (u64::MAX as f32) * 2.0 - 1.0;
-            embedding.push(normalized * 0.1); // Keep values small for realistic embeddings
-        }
-
-        println!(
-            "🤖 Generated mock embedding (1024-dim) for content using mxbai-embed-large: '{}'",
-            if content.len() > 50 {
-                &content[..50]
-            } else {
-                content
-            }
-        );
-
-        Ok(embedding)
-    }
-
-    /// Generate embedding from Ollama API (production mode)
+    /// Generate embedding from Ollama API
     async fn generate_embedding_from_ollama(&self, content: &str) -> AIResult<Vec<f32>> {
-        // This would be implemented with actual HTTP client in production
-        // For development, fall back to mock for now
-        self.generate_mock_embedding(content).await
+        let url = format!("{}/api/embed", self.api_url);
+        
+        let request = EmbeddingRequest {
+            model: self.model.clone(),
+            input: vec![content.to_string()],
+        };
+        
+        let response = self.client
+            .post(&url)
+            .json(&request)
+            .send()
+            .await
+            .map_err(|e| AIError::HttpError(format!("Failed to send request: {}", e)))?;
+        
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_else(|_| "Unknown error".to_string());
+            return Err(AIError::HttpError(format!(
+                "Ollama API error ({}): {}",
+                status, error_text
+            )));
+        }
+        
+        let embedding_response: EmbeddingResponse = response
+            .json()
+            .await
+            .map_err(|e| AIError::InvalidResponse(format!("Failed to parse response: {}", e)))?;
+        
+        // Get the first (and only) embedding from the response
+        let embedding = embedding_response.embeddings
+            .into_iter()
+            .next()
+            .ok_or_else(|| AIError::InvalidResponse("No embeddings in response".to_string()))?;
+        
+        Ok(embedding)
     }
 
     /// Generate hash for content (simple but effective for caching)
@@ -225,21 +253,26 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    #[ignore] // Only run when Ollama is available
     async fn test_ollama_connection() {
         let engine = LocalAIEngine::new().await;
         match engine {
             Ok(_) => println!("✅ Ollama connection test passed"),
-            Err(e) => println!("❌ Ollama connection test failed: {}", e),
+            Err(e) => {
+                println!("⚠️ Ollama connection test skipped: {}", e);
+                println!("   Make sure Ollama is running: ollama serve");
+            }
         }
     }
 
     #[tokio::test]
-    #[ignore] // Only run when Ollama is available
     async fn test_embedding_generation() {
-        let engine = LocalAIEngine::new()
-            .await
-            .expect("Failed to create AI engine");
+        let engine = match LocalAIEngine::new().await {
+            Ok(e) => e,
+            Err(_) => {
+                println!("⚠️ Skipping test - Ollama not available");
+                return;
+            }
+        };
 
         let content = "Hello, AI world!";
         let embedding = engine
@@ -252,11 +285,14 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore] // Only run when Ollama is available
     async fn test_embedding_caching() {
-        let engine = LocalAIEngine::new()
-            .await
-            .expect("Failed to create AI engine");
+        let engine = match LocalAIEngine::new().await {
+            Ok(e) => e,
+            Err(_) => {
+                println!("⚠️ Skipping test - Ollama not available");
+                return;
+            }
+        };
 
         let content = "Test caching functionality";
 
@@ -291,15 +327,3 @@ mod tests {
     }
 }
 
-impl Default for LocalAIEngine {
-    /// Create a default LocalAIEngine instance for testing
-    fn default() -> Self {
-        Self {
-            model: Self::DEFAULT_MODEL.to_string(),
-            embedding_cache: Arc::new(Mutex::new(HashMap::new())),
-            cache_hits: Arc::new(Mutex::new(0)),
-            cache_misses: Arc::new(Mutex::new(0)),
-            mock_mode: true, // Always use mock mode for default/testing
-        }
-    }
-}
