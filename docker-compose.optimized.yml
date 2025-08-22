@@ -1,0 +1,224 @@
+# ================================================================================
+# Memory Nexus - Optimized Production Docker Compose
+# ================================================================================
+# Production-ready configuration with performance optimizations
+# Uses the optimized Docker image with musl static binary
+
+version: '3.9'
+
+services:
+  # ================================================================================
+  # Memory Nexus Pipeline - Main Application
+  # ================================================================================
+  memory-nexus:
+    build:
+      context: .
+      dockerfile: Dockerfile.optimized
+      target: distroless  # Use distroless for production
+      cache_from:
+        - lukemathwalker/cargo-chef:latest-rust-1.81
+      args:
+        - BUILDKIT_INLINE_CACHE=1
+    image: memory-nexus:optimized
+    container_name: memory-nexus-optimized
+    restart: unless-stopped
+    ports:
+      - "8086:8086"  # HTTP API
+      - "9090:9090"  # Metrics
+    environment:
+      # Rust configuration
+      RUST_LOG: info,memory_nexus=debug
+      RUST_BACKTRACE: 0  # Disable in production for performance
+      
+      # Application configuration
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: 8086
+      METRICS_PORT: 9090
+      
+      # Database connections
+      SURREALDB_URL: ws://surrealdb:8000
+      QDRANT_URL: http://qdrant:6333
+      REDIS_URL: redis://redis:6379
+      
+      # Performance settings
+      TOKIO_WORKER_THREADS: 4
+      RAYON_NUM_THREADS: 4
+      
+    volumes:
+      - nexus_data:/data
+      - ./config.toml:/data/config.toml:ro
+    networks:
+      - nexus_network
+    depends_on:
+      surrealdb:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["/memory-nexus", "health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+        reservations:
+          cpus: '0.5'
+          memory: 128M
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      memlock:
+        soft: -1
+        hard: -1
+
+  # ================================================================================
+  # SurrealDB - Multi-model Database
+  # ================================================================================
+  surrealdb:
+    image: surrealdb/surrealdb:v2.0.4
+    container_name: nexus-surrealdb
+    restart: unless-stopped
+    command: start --user root --pass root memory --no-banner --bind 0.0.0.0:8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - surrealdb_data:/data
+    networks:
+      - nexus_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+
+  # ================================================================================
+  # Qdrant - Vector Database
+  # ================================================================================
+  qdrant:
+    image: qdrant/qdrant:v1.12.5
+    container_name: nexus-qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"
+      - "6334:6334"  # gRPC port
+    volumes:
+      - qdrant_data:/qdrant/storage
+    environment:
+      QDRANT__SERVICE__HTTP_PORT: 6333
+      QDRANT__SERVICE__GRPC_PORT: 6334
+      QDRANT__LOG_LEVEL: INFO
+      # Performance optimizations
+      QDRANT__STORAGE__WAL__WAL_CAPACITY_MB: 64
+      QDRANT__STORAGE__OPTIMIZERS__INDEXING_THRESHOLD_KB: 10000
+      QDRANT__STORAGE__PERFORMANCE__MAX_OPTIMIZATION_THREADS: 2
+    networks:
+      - nexus_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/readyz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+  # ================================================================================
+  # Redis - Cache Layer
+  # ================================================================================
+  redis:
+    image: redis:7.4-alpine
+    container_name: nexus-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+      --appendonly yes
+      --maxmemory 256mb
+      --maxmemory-policy allkeys-lru
+      --tcp-backlog 511
+      --tcp-keepalive 60
+      --timeout 0
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - nexus_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  # ================================================================================
+  # Ollama - Local LLM Service (Optional, for embeddings)
+  # ================================================================================
+  ollama:
+    image: ollama/ollama:0.5.1
+    container_name: nexus-ollama
+    restart: unless-stopped
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_NUM_PARALLEL: 2
+      OLLAMA_MAX_LOADED_MODELS: 1
+      OLLAMA_KEEP_ALIVE: 5m
+    networks:
+      - nexus_network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+    profiles:
+      - with-llm  # Only start when --profile with-llm is specified
+
+# ================================================================================
+# Networks
+# ================================================================================
+networks:
+  nexus_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+# ================================================================================
+# Volumes
+# ================================================================================
+volumes:
+  nexus_data:
+    driver: local
+  surrealdb_data:
+    driver: local
+  qdrant_data:
+    driver: local
+  redis_data:
+    driver: local
+  ollama_data:
+    driver: local

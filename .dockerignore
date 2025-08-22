@@ -1,0 +1,126 @@
+# ================================================================================
+# Docker Ignore - Minimize build context for faster builds
+# ================================================================================
+
+# Git
+.git/
+.github/
+.gitignore
+
+# Target directory (build artifacts)
+target/
+Cargo.lock
+
+# Development files
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.iml
+.project
+.classpath
+.settings/
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# Test files
+tests/
+benches/
+examples/
+
+# CI/CD
+.gitlab-ci.yml
+.travis.yml
+azure-pipelines.yml
+
+# Scripts (except needed ones)
+scripts/
+!scripts/docker-entrypoint.sh
+
+# PGO data
+pgo-data/
+*.profraw
+*.profdata
+bolt-profile.fdata
+perf.data
+
+# Local configuration
+.env
+.env.local
+config.local.toml
+
+# Logs
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Docker files (don't copy Docker files into the image)
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Linux
+.directory
+.Trash-*
+
+# Node (if any frontend)
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Python (if any scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+
+# Backup files
+*.bak
+*.backup
+*.old
+
+# Coverage
+coverage/
+*.lcov
+.nyc_output/
+
+# Build artifacts that shouldn't be in context
+*.o
+*.a
+*.so
+*.dylib
+*.exe
+*.dll
+
+# Archive files
+*.tar
+*.tar.gz
+*.zip
+*.7z
+*.rar

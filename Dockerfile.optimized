@@ -1,0 +1,114 @@
+# ================================================================================
+# Memory Nexus - Ultra-Optimized Production Container
+# ================================================================================
+# Based on production patterns achieving 460x size reduction (2.15GB → 4.6MB)
+# Uses multi-stage build with musl for static binary and scratch/distroless base
+#
+# Size comparison:
+# - Standard Rust image: ~2GB
+# - debian:bookworm-slim: ~74MB  
+# - distroless: ~20MB
+# - scratch: ~0MB (just the binary)
+
+# ================================================================================
+# Stage 1: Chef - Dependency caching for faster rebuilds
+# ================================================================================
+FROM lukemathwalker/cargo-chef:latest-rust-1.81 AS chef
+WORKDIR /app
+
+# ================================================================================
+# Stage 2: Planner - Generate recipe for dependencies
+# ================================================================================
+FROM chef AS planner
+COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+RUN cargo chef prepare --recipe-path recipe.json
+
+# ================================================================================
+# Stage 3: Builder - Compile with maximum optimizations
+# ================================================================================
+FROM chef AS builder
+
+# Install musl target for static compilation
+RUN rustup target add x86_64-unknown-linux-musl
+RUN apt-get update && apt-get install -y \
+    musl-tools \
+    musl-dev \
+    clang \
+    llvm \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Build dependencies (cached)
+COPY --from=planner /app/recipe.json recipe.json
+RUN cargo chef cook --release --target x86_64-unknown-linux-musl --recipe-path recipe.json
+
+# Copy source and build
+COPY . .
+
+# Maximum optimization flags for production
+ENV RUSTFLAGS="-C target-cpu=x86-64-v3 \
+    -C opt-level=3 \
+    -C lto=fat \
+    -C codegen-units=1 \
+    -C panic=abort \
+    -C strip=symbols \
+    -C link-arg=-s \
+    -C link-arg=-static \
+    -C relocation-model=static"
+
+# Build with musl for static binary
+RUN cargo build --release \
+    --target x86_64-unknown-linux-musl \
+    --features full \
+    --bin memory-nexus-pipeline
+
+# Strip the binary for minimal size
+RUN strip /app/target/x86_64-unknown-linux-musl/release/memory-nexus-pipeline
+
+# ================================================================================
+# Stage 4: Distroless Runtime - Minimal secure container
+# ================================================================================
+FROM gcr.io/distroless/static-debian12:nonroot AS distroless
+
+# Copy the static binary
+COPY --from=builder --chown=nonroot:nonroot \
+    /app/target/x86_64-unknown-linux-musl/release/memory-nexus-pipeline \
+    /memory-nexus
+
+# Metadata
+LABEL org.opencontainers.image.source="https://github.com/memory-nexus/pipeline"
+LABEL org.opencontainers.image.description="Memory Nexus - High-Performance AI Pipeline"
+LABEL org.opencontainers.image.licenses="MIT"
+
+# Expose ports
+EXPOSE 8086 9090
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["/memory-nexus", "health"]
+
+# Run as non-root user (automatic in distroless/nonroot)
+ENTRYPOINT ["/memory-nexus"]
+
+# ================================================================================
+# Stage 5: Scratch Runtime - Absolute minimal (Optional, even smaller)
+# ================================================================================
+FROM scratch AS scratch-runtime
+
+# Copy only the static binary - nothing else
+COPY --from=builder \
+    /app/target/x86_64-unknown-linux-musl/release/memory-nexus-pipeline \
+    /memory-nexus
+
+# Expose ports
+EXPOSE 8086 9090
+
+# This is the absolute minimum - just the binary
+ENTRYPOINT ["/memory-nexus"]
+
+# ================================================================================
+# Default to distroless (more compatible than scratch)
+# ================================================================================
+FROM distroless

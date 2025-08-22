@@ -1,5 +1,6 @@
 //! Pipeline processing module - Empty implementation ready for new pipeline
 
+pub mod channels;
 pub mod fusion;
 pub mod intelligent_router;
 pub mod preprocessor;
@@ -17,6 +18,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // Re-export pipeline components
+pub use channels::{
+    CacheOnlyChannel, SmartRoutingChannel, AdaptiveBatcher, ChannelFactory,
+};
 pub use fusion::FusionEngine;
 pub use intelligent_router::{
     IntelligentRouter, QueryAnalysis, RoutingPath, ComplexityLevel,

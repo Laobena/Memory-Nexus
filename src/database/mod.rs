@@ -1,6 +1,6 @@
 //! Database management module
 
-pub mod connection_pool;
+// Basic connection pool removed - use enhanced_pool instead
 pub mod enhanced_pool;
 pub mod database_connections;
 
@@ -10,11 +10,20 @@ use std::sync::Arc;
 use sync_engine::{ResilientSyncStrategy, SyncConfig, SyncHealth};
 use tracing::{error, info};
 
-pub use connection_pool::{ConnectionPool, PoolConfig, PoolableConnection, ConnectionFactory};
+// Export enhanced pool as the standard connection pool
 pub use enhanced_pool::{
-    EnhancedConnectionPool, PoolConfig as EnhancedPoolConfig, PoolStats, 
-    CircuitBreaker, HealthMonitor, HealthStatus, RetryPolicy, PooledConnection,
-    PoolStatsSnapshot, PoolError
+    EnhancedConnectionPool as ConnectionPool,
+    PoolConfig,
+    PoolStats,
+    CircuitBreaker,
+    HealthMonitor,
+    HealthStatus,
+    RetryPolicy,
+    PooledConnection,
+    PoolStatsSnapshot,
+    PoolError,
+    // Add aliases for compatibility
+    PooledConnection as PoolableConnection,
 };
 pub use database_connections::{
     UnifiedDatabasePool, DatabaseConfig, SurrealDBConfig, QdrantConfig, RedisConfig,

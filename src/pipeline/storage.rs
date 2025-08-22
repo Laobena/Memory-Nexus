@@ -1,8 +1,11 @@
 use crate::core::{Config, Result, NexusError};
+use crate::core::zero_copy::{FastSerializer, ZeroCopyAccessor};
 use super::preprocessor::PreprocessedData;
 use async_trait::async_trait;
 use dashmap::DashMap;
+use memmap2::{MmapOptions, Mmap};
 use std::sync::Arc;
+use std::fs::File;
 use parking_lot::RwLock;
 use bytes::Bytes;
 
@@ -12,6 +15,8 @@ pub struct StorageEngine {
     primary_backend: Arc<RwLock<String>>,
     cache: Arc<moka::future::Cache<String, Bytes>>,
     compression_enabled: bool,
+    serializer: Arc<FastSerializer>,
+    mmap_cache: Arc<DashMap<String, Arc<Mmap>>>,
 }
 
 #[async_trait]
@@ -35,6 +40,8 @@ impl StorageEngine {
             primary_backend: Arc::new(RwLock::new("memory".to_string())),
             cache: Arc::new(cache),
             compression_enabled: true,
+            serializer: Arc::new(FastSerializer::with_capacity(4096)),
+            mmap_cache: Arc::new(DashMap::new()),
         }
     }
     
@@ -48,7 +55,10 @@ impl StorageEngine {
     
     pub async fn store(&self, data: &PreprocessedData) -> Result<()> {
         let key = generate_storage_key(&data.original);
-        let serialized = serde_json::to_vec(&data)?;
+        
+        // Use zero-copy serialization instead of JSON
+        let serialized = self.serializer.serialize(data)
+            .map_err(|e| NexusError::Serialization(e.to_string()))?;
         
         let compressed = if self.compression_enabled {
             compress_data(&serialized)?
@@ -77,7 +87,11 @@ impl StorageEngine {
                 cached.to_vec()
             };
             
-            let data: PreprocessedData = serde_json::from_slice(&decompressed)?;
+            // Use zero-copy deserialization
+            let archived = ZeroCopyAccessor::access::<PreprocessedData>(&decompressed)
+                .map_err(|e| NexusError::Deserialization(e.to_string()))?;
+            let data = ZeroCopyAccessor::deserialize(archived)
+                .map_err(|e| NexusError::Deserialization(e.to_string()))?;
             return Ok(Some(data));
         }
         
@@ -114,6 +128,28 @@ impl StorageEngine {
         } else {
             Err(NexusError::NotFound(format!("Backend '{}' not found", name)))
         }
+    }
+    
+    /// Memory-map a file for zero-copy access
+    pub async fn mmap_file(&self, path: &str) -> Result<Arc<Mmap>> {
+        // Check cache first
+        if let Some(cached) = self.mmap_cache.get(path) {
+            return Ok(cached.clone());
+        }
+        
+        // Open file and create memory map
+        let file = File::open(path)
+            .map_err(|e| NexusError::Io(e.to_string()))?;
+        let mmap = unsafe { 
+            MmapOptions::new()
+                .map(&file)
+                .map_err(|e| NexusError::Io(e.to_string()))?
+        };
+        
+        let mmap_arc = Arc::new(mmap);
+        self.mmap_cache.insert(path.to_string(), mmap_arc.clone());
+        
+        Ok(mmap_arc)
     }
 }
 

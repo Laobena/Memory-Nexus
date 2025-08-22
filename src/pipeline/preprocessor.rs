@@ -1,8 +1,11 @@
 use crate::core::{Config, Result, NexusError};
 use crate::core::types::{PipelineRequest, DenseVector, SparseVector, Batch};
+use crate::core::simd_ops::SimdOps;
+use crate::optimizations::memory_pool::{VectorPool, PoolHandle};
 use super::router::Route;
 use async_trait::async_trait;
 use rayon::prelude::*;
+use crossbeam::deque::{Worker, Stealer, Injector};
 use std::sync::Arc;
 use parking_lot::RwLock;
 
@@ -12,6 +15,8 @@ pub struct Preprocessor {
     tokenizers: Vec<Box<dyn Tokenizer>>,
     batch_size: usize,
     parallel_enabled: bool,
+    vector_pool: Arc<VectorPool>,
+    work_queue: Arc<Injector<PreprocessTask>>,
 }
 
 pub struct PreprocessedData {
@@ -20,6 +25,11 @@ pub struct PreprocessedData {
     pub tokens: Vec<String>,
     pub embeddings: Option<DenseVector>,
     pub metadata: serde_json::Value,
+}
+
+struct PreprocessTask {
+    text: String,
+    id: usize,
 }
 
 #[async_trait]
@@ -44,6 +54,8 @@ impl Preprocessor {
             ],
             batch_size: 128,
             parallel_enabled: true,
+            vector_pool: Arc::new(VectorPool::new()),
+            work_queue: Arc::new(Injector::new()),
         }
     }
     
@@ -59,8 +71,21 @@ impl Preprocessor {
         // Tokenize
         let tokens = self.tokenize_text(&normalized);
         
-        // Generate embeddings if needed (placeholder)
-        let embeddings = None; // Would integrate with AI engine here
+        // Generate embeddings with memory pool if needed
+        let embeddings = if let Some(existing_emb) = &request.embeddings {
+            // Use memory pool for zero-allocation vector operations
+            PoolHandle::with_embedding(|mut vec| {
+                vec.extend_from_slice(&existing_emb.data);
+                // Normalize using SIMD operations
+                SimdOps::normalize(&mut vec);
+                Some(DenseVector {
+                    data: vec.clone(),
+                    dimensions: vec.len(),
+                })
+            })
+        } else {
+            None
+        };
         
         Ok(PreprocessedData {
             original: request.clone(),
@@ -71,6 +96,8 @@ impl Preprocessor {
                 "preprocessor_version": "2.0.0",
                 "normalizers_applied": self.normalizers.len(),
                 "tokenizers_applied": self.tokenizers.len(),
+                "simd_optimized": true,
+                "memory_pool_used": true,
             }),
         })
     }

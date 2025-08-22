@@ -1,11 +1,14 @@
 //! Cache Module for Memory Nexus
 //!
-//! Streamlined caching system with Moka cache implementation
+//! Streamlined caching system using consolidated lock-free cache
 
-// Core cache implementations
-pub mod moka_cache;
 pub mod factory;
 
-// Re-exports
-pub use moka_cache::{SafeWTinyLFUCache, CacheInterface, CacheConfig, CacheMetrics};
+// Use consolidated cache from core module
+pub use crate::core::lock_free_cache::{
+    LockFreeCache as SafeWTinyLFUCache,
+    LockFreeCache as CacheInterface,
+    CacheConfig,
+    CacheStats as CacheMetrics
+};
 pub use factory::CacheFactory;

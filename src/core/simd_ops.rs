@@ -511,30 +511,92 @@ impl SimdOps {
         }
     }
     
-    /// Batch dot products - optimized for multiple queries
+    /// Batch dot products - optimized for multiple queries with parallel processing
+    /// Uses rayon for automatic work-stealing and optimal CPU utilization
     pub fn batch_dot_products(matrix: &[Vec<f32>], query: &[f32]) -> Vec<f32> {
-        matrix.iter()
-            .map(|row| Self::dot_product(row, query))
+        use rayon::prelude::*;
+        
+        // Adaptive batching based on matrix size
+        let chunk_size = if matrix.len() > 10000 {
+            64  // Larger chunks for big datasets
+        } else if matrix.len() > 1000 {
+            32  // Medium chunks
+        } else {
+            16  // Smaller chunks for better cache locality
+        };
+        
+        matrix.par_chunks(chunk_size)
+            .flat_map(|chunk| {
+                chunk.iter()
+                    .map(|row| Self::dot_product(row, query))
+                    .collect::<Vec<_>>()
+            })
             .collect()
     }
     
-    /// Batch cosine similarities - optimized for multiple queries
+    /// Batch cosine similarities - optimized for multiple queries with parallel processing
+    /// Pre-computes query norm once and uses parallel processing for large batches
     pub fn batch_cosine_similarities(matrix: &[Vec<f32>], query: &[f32]) -> Vec<f32> {
-        // Pre-compute query norm
+        use rayon::prelude::*;
+        
+        // Pre-compute query norm once
         let query_norm = Self::vector_norm(query);
         if query_norm == 0.0 {
             return vec![0.0; matrix.len()];
         }
         
-        matrix.iter()
-            .map(|row| {
-                let dot = Self::dot_product(row, query);
-                let row_norm = Self::vector_norm(row);
-                if row_norm == 0.0 {
-                    0.0
-                } else {
-                    dot / (row_norm * query_norm)
+        // Adaptive threshold for parallel processing
+        const PARALLEL_THRESHOLD: usize = 100;
+        
+        if matrix.len() < PARALLEL_THRESHOLD {
+            // Sequential for small batches (better cache locality)
+            matrix.iter()
+                .map(|row| {
+                    let dot = Self::dot_product(row, query);
+                    let row_norm = Self::vector_norm(row);
+                    if row_norm == 0.0 {
+                        0.0
+                    } else {
+                        dot / (row_norm * query_norm)
+                    }
+                })
+                .collect()
+        } else {
+            // Parallel processing for large batches
+            matrix.par_iter()
+                .map(|row| {
+                    let dot = Self::dot_product(row, query);
+                    let row_norm = Self::vector_norm(row);
+                    if row_norm == 0.0 {
+                        0.0
+                    } else {
+                        dot / (row_norm * query_norm)
+                    }
+                })
+                .collect()
+        }
+    }
+    
+    /// Advanced batch matrix multiplication with tiling for cache efficiency
+    /// Processes multiple vector-matrix operations in a cache-friendly manner
+    pub fn batch_matrix_multiply(queries: &[Vec<f32>], matrix: &[Vec<f32>]) -> Vec<Vec<f32>> {
+        use rayon::prelude::*;
+        
+        // Tile size optimized for L1 cache (32KB typical)
+        const TILE_SIZE: usize = 64;
+        
+        queries.par_iter()
+            .map(|query| {
+                let mut results = Vec::with_capacity(matrix.len());
+                
+                // Process in tiles for better cache usage
+                for chunk in matrix.chunks(TILE_SIZE) {
+                    for row in chunk {
+                        results.push(Self::dot_product(row, query));
+                    }
                 }
+                
+                results
             })
             .collect()
     }

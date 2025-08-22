@@ -1,5 +1,5 @@
-pub mod simd;
-pub mod binary_embeddings;
+// SIMD operations consolidated in core::simd_ops
+// Binary embeddings consolidated in core::binary_embeddings
 pub mod lock_free;
 pub mod memory_pool;
 
@@ -8,9 +8,8 @@ mod memory_pool_tests;
 
 use crate::core::Result;
 
-// Re-export optimization components
-pub use simd::SimdProcessor;
-pub use binary_embeddings::BinaryEmbedding;
+// Re-export optimization components from core modules
+// Use core::binary_embeddings::BinaryEmbedding for binary embeddings
 pub use lock_free::LockFreeQueue;
 pub use memory_pool::MemoryPool;
 
@@ -26,10 +25,8 @@ pub fn initialize_optimizations() -> Result<()> {
         cpu_features.has_sse
     );
     
-    // Initialize SIMD if available
-    if cpu_features.has_avx2 || cpu_features.has_sse {
-        simd::initialize()?;
-    }
+    // SIMD initialization now handled by core::simd_ops automatically
+    // No need for explicit initialization
     
     // Set up memory pools
     memory_pool::initialize_global_pool()?;

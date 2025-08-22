@@ -6,6 +6,7 @@ pub mod hash_utils;
 pub mod lock_free_cache;
 pub mod simd_ops;
 pub mod types;
+pub mod zero_copy;
 
 // Aligned allocation exports
 pub use aligned_alloc::{
@@ -43,6 +44,13 @@ pub use simd_ops::{
 
 // Core types exports
 pub use types::*;
+
+// Zero-copy serialization exports
+pub use zero_copy::{
+    ZeroCopySearchResult, SearchSource, ZeroCopyCacheEntry, CacheMetadata,
+    ZeroCopyMessage, PipelineStage, MessagePayload, QueryPayload,
+    FastSerializer, ZeroCopyAccessor, BatchSerializer,
+};
 
 use once_cell::sync::Lazy;
 use std::sync::Arc;

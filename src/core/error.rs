@@ -23,6 +23,12 @@ pub enum NexusError {
     #[error("Serialization error: {0}")]
     Serialization(#[from] serde_json::Error),
     
+    #[error("rkyv serialization error: {0}")]
+    SerializationError(String),
+    
+    #[error("rkyv deserialization error: {0}")]
+    DeserializationError(String),
+    
     #[error("Invalid state: {0}")]
     InvalidState(String),
     
