@@ -1,0 +1,1 @@
+ make sure you use context7 mcp before coding for rich document insight.  
