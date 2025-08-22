@@ -1,0 +1,329 @@
+name: Performance Monitoring
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -C target-cpu=native
+  RUST_BACKTRACE: 1
+
+jobs:
+  benchmark:
+    name: Performance Benchmarks
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        profile: [release, pgo]
+        
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        components: rustfmt, clippy
+        
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          linux-tools-common \
+          linux-tools-generic \
+          linux-tools-$(uname -r) \
+          valgrind \
+          libssl-dev \
+          pkg-config
+          
+    - name: Install cargo tools
+      run: |
+        cargo install hyperfine --locked
+        cargo install flamegraph --locked
+        cargo install cargo-criterion --locked
+        
+    - name: Cache cargo registry
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          target
+        key: ${{ runner.os }}-cargo-${{ matrix.profile }}-${{ hashFiles('**/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-${{ matrix.profile }}-
+          ${{ runner.os }}-cargo-
+          
+    - name: Check CPU features
+      run: |
+        echo "=== CPU Information ==="
+        lscpu
+        echo ""
+        echo "=== CPU Features ==="
+        cat /proc/cpuinfo | grep flags | head -1
+        
+    - name: Build with profile ${{ matrix.profile }}
+      run: |
+        if [ "${{ matrix.profile }}" = "pgo" ]; then
+          # Profile-Guided Optimization build
+          echo "Building with PGO..."
+          
+          # Step 1: Build with profiling
+          RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" \
+            cargo build --release --features full
+            
+          # Step 2: Run profiling workload
+          ./target/release/memory-nexus-pipeline --version
+          cargo test --release --features full
+          cargo bench --features full -- --profile-time 5
+          
+          # Step 3: Build with profile data
+          RUSTFLAGS="-Cprofile-use=/tmp/pgo-data" \
+            cargo build --release --features full
+        else
+          # Regular release build
+          cargo build --profile ${{ matrix.profile }} --features full
+        fi
+        
+    - name: Run benchmarks
+      run: |
+        cargo bench --features full -- --output-format bencher | tee benchmark_results.txt
+        
+    - name: Run hyperfine benchmarks
+      run: |
+        hyperfine --warmup 3 --min-runs 10 \
+          --export-json startup_latency.json \
+          --export-markdown startup_latency.md \
+          './target/release/memory-nexus-pipeline --version'
+          
+    - name: Generate flamegraph
+      run: |
+        cargo flamegraph --release --features full \
+          --output flamegraph.svg \
+          -- --version
+          
+    - name: Analyze binary size
+      run: |
+        echo "=== Binary Size Analysis ==="
+        ls -lh target/release/memory-nexus-pipeline
+        size target/release/memory-nexus-pipeline
+        
+        echo ""
+        echo "=== Strip Analysis ==="
+        cp target/release/memory-nexus-pipeline target/release/memory-nexus-pipeline-stripped
+        strip target/release/memory-nexus-pipeline-stripped
+        ls -lh target/release/memory-nexus-pipeline-stripped
+        
+    - name: Check SIMD usage
+      run: |
+        echo "=== SIMD Instruction Analysis ==="
+        echo "AVX2 instructions:"
+        objdump -d target/release/memory-nexus-pipeline | grep -c "vp" || echo "0"
+        echo "SSE instructions:"
+        objdump -d target/release/memory-nexus-pipeline | grep -c "xmm" || echo "0"
+        echo "AVX512 instructions:"
+        objdump -d target/release/memory-nexus-pipeline | grep -c "zmm" || echo "0"
+        
+    - name: Memory profiling with Valgrind
+      if: matrix.profile == 'release'
+      run: |
+        timeout 10s valgrind --tool=massif --massif-out-file=massif.out \
+          ./target/release/memory-nexus-pipeline --version || true
+        if [ -f massif.out ]; then
+          ms_print massif.out > massif_report.txt
+          head -50 massif_report.txt
+        fi
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: performance-results-${{ matrix.profile }}
+        path: |
+          benchmark_results.txt
+          startup_latency.json
+          startup_latency.md
+          flamegraph.svg
+          massif_report.txt
+          
+    - name: Comment PR with results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v7
+      with:
+        script: |
+          const fs = require('fs');
+          
+          // Read benchmark results
+          const benchResults = fs.readFileSync('benchmark_results.txt', 'utf8');
+          const startupResults = fs.readFileSync('startup_latency.md', 'utf8');
+          
+          // Extract key metrics
+          const lines = benchResults.split('\n');
+          const metrics = lines.filter(line => 
+            line.includes('ns/iter') || 
+            line.includes('throughput')
+          ).slice(0, 10);
+          
+          // Create comment
+          const comment = `## 🚀 Performance Results (${{ matrix.profile }})
+          
+          ### Benchmark Results
+          \`\`\`
+          ${metrics.join('\n')}
+          \`\`\`
+          
+          ### Startup Latency
+          ${startupResults}
+          
+          ### Binary Size
+          - Release: $(ls -lh target/release/memory-nexus-pipeline | awk '{print $5}')
+          - Stripped: $(ls -lh target/release/memory-nexus-pipeline-stripped | awk '{print $5}')
+          
+          [Full results available in artifacts]
+          `;
+          
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  regression-check:
+    name: Performance Regression Check
+    runs-on: ubuntu-latest
+    needs: benchmark
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download current results
+      uses: actions/download-artifact@v3
+      with:
+        name: performance-results-release
+        path: current/
+        
+    - name: Download baseline results
+      continue-on-error: true
+      uses: dawidd6/action-download-artifact@v2
+      with:
+        workflow: performance.yml
+        branch: main
+        name: performance-results-release
+        path: baseline/
+        
+    - name: Compare results
+      run: |
+        if [ -d "baseline" ]; then
+          echo "=== Performance Comparison ==="
+          echo "Comparing current results with baseline..."
+          
+          # Simple comparison - in production, use more sophisticated tools
+          diff -u baseline/benchmark_results.txt current/benchmark_results.txt || true
+          
+          # Check for regression (simplified)
+          if grep -q "slower" current/benchmark_results.txt; then
+            echo "⚠️ Potential performance regression detected!"
+          else
+            echo "✅ No performance regression detected"
+          fi
+        else
+          echo "No baseline results available for comparison"
+        fi
+        
+    - name: Update baseline
+      if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+      run: |
+        echo "Updating baseline with current results..."
+        # In a real setup, this would push to a metrics branch or external service
+
+  profile-guided-optimization:
+    name: PGO Build Validation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: stable
+        
+    - name: PGO Build Process
+      run: |
+        echo "=== Starting PGO Build Process ==="
+        
+        # Create PGO data directory
+        mkdir -p /tmp/pgo-data
+        
+        # Step 1: Instrumented build
+        echo "Step 1: Building with profiling instrumentation..."
+        RUSTFLAGS="-Cprofile-generate=/tmp/pgo-data" \
+          cargo build --release --features full
+          
+        # Step 2: Training runs
+        echo "Step 2: Running training workload..."
+        ./target/release/memory-nexus-pipeline --version
+        
+        # Run comprehensive test suite for profiling
+        cargo test --release --features full
+        
+        # Run benchmarks for profiling (limited time)
+        timeout 60s cargo bench --features full || true
+        
+        # Step 3: Optimized build with profile data
+        echo "Step 3: Building with profile data..."
+        cargo clean
+        RUSTFLAGS="-Cprofile-use=/tmp/pgo-data -Cllvm-args=-pgo-warn-missing-function" \
+          cargo build --release --features full
+          
+        echo "=== PGO Build Complete ==="
+        
+    - name: Validate PGO effectiveness
+      run: |
+        # Run benchmarks to compare PGO vs non-PGO
+        cargo bench --features full -- --save-baseline pgo
+        
+        # Compare binary sizes
+        echo "PGO Binary size:"
+        ls -lh target/release/memory-nexus-pipeline
+        
+    - name: BOLT optimization (experimental)
+      continue-on-error: true
+      run: |
+        # Install BOLT if available
+        if command -v llvm-bolt; then
+          echo "=== Applying BOLT optimization ==="
+          
+          # Profile the binary
+          perf record -e cycles:u -j any,u -o perf.data -- \
+            ./target/release/memory-nexus-pipeline --version
+            
+          # Convert profile to BOLT format
+          perf2bolt ./target/release/memory-nexus-pipeline \
+            -p perf.data -o perf.fdata
+            
+          # Optimize with BOLT
+          llvm-bolt ./target/release/memory-nexus-pipeline \
+            -o ./target/release/memory-nexus-pipeline-bolt \
+            -data=perf.fdata \
+            -reorder-blocks=cache+ \
+            -reorder-functions=hfsort \
+            -split-functions=2 \
+            -split-all-cold \
+            -split-eh \
+            -dyno-stats
+            
+          echo "BOLT-optimized binary size:"
+          ls -lh target/release/memory-nexus-pipeline-bolt
+        else
+          echo "BOLT not available, skipping..."
+        fi

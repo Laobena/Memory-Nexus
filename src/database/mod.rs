@@ -1,10 +1,26 @@
 //! Database management module
 
+pub mod connection_pool;
+pub mod enhanced_pool;
+pub mod database_connections;
+
 use crate::config::Config;
 use database_adapters::{QdrantAdapter, SurrealDBAdapter, HealthCheck};
 use std::sync::Arc;
 use sync_engine::{ResilientSyncStrategy, SyncConfig, SyncHealth};
 use tracing::{error, info};
+
+pub use connection_pool::{ConnectionPool, PoolConfig, PoolableConnection, ConnectionFactory};
+pub use enhanced_pool::{
+    EnhancedConnectionPool, PoolConfig as EnhancedPoolConfig, PoolStats, 
+    CircuitBreaker, HealthMonitor, HealthStatus, RetryPolicy, PooledConnection,
+    PoolStatsSnapshot, PoolError
+};
+pub use database_connections::{
+    UnifiedDatabasePool, DatabaseConfig, SurrealDBConfig, QdrantConfig, RedisConfig,
+    SurrealDBConnection, QdrantConnection, RedisPooledConnection,
+    OverallHealth, DatabaseHealth, UnifiedPoolStats, DatabasePoolError
+};
 
 /// Database manager coordinating all database connections
 pub struct DatabaseManager {

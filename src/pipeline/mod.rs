@@ -1,10 +1,47 @@
 //! Pipeline processing module - Empty implementation ready for new pipeline
 
+pub mod fusion;
+pub mod intelligent_router;
+pub mod preprocessor;
+pub mod preprocessor_enhanced;
+pub mod router;
+pub mod search;
+pub mod search_orchestrator;
+pub mod storage;
+pub mod unified_pipeline;
+
 use crate::ai::LocalAIEngine;
 use crate::vectors::VectorCapabilities;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tracing::{debug, info, warn};
+
+// Re-export pipeline components
+pub use fusion::FusionEngine;
+pub use intelligent_router::{
+    IntelligentRouter, QueryAnalysis, RoutingPath, ComplexityLevel,
+    QueryDomain, QueryFeatures, RouterConfig, RoutingStatsSnapshot,
+};
+pub use preprocessor::Preprocessor;
+pub use preprocessor_enhanced::{
+    ParallelPreprocessor, PreprocessedData, ChunkingStrategy, TextChunk,
+    Entity, EntityType, ProcessingMetadata, EntityExtractor, MinHashDeduplicator,
+};
+pub use router::Router;
+pub use search::SearchEngine;
+pub use search_orchestrator::{
+    SearchOrchestrator, SearchResult, SearchSource, SearchConfig,
+    AccuracyEngine, IntelligenceEngine, LearningEngine, MiningEngine,
+};
+pub use storage::StorageEngine;
+pub use unified_pipeline::{
+    UnifiedPipeline, PipelineConfig, PipelineResponse, FusedResult, FusedMetadata
+};
+
+// Re-export main pipeline
+pub use self::pipeline::Pipeline;
+
+mod pipeline;
 
 /// Pipeline handler - placeholder for new implementation
 pub struct PipelineHandler {
@@ -191,6 +228,9 @@ impl Default for PipelineHandler {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod fusion_tests;
 
 #[cfg(test)]
 mod tests {

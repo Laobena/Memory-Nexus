@@ -1,0 +1,137 @@
+# Prometheus Configuration for Memory Nexus Pipeline
+# Runtime performance monitoring and metrics collection
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    monitor: 'memory-nexus'
+    environment: 'production'
+
+# Alerting configuration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: []
+
+# Rule files
+rule_files:
+  - "alerts/*.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Memory Nexus Application Metrics
+  - job_name: 'memory-nexus-app'
+    static_configs:
+      - targets: ['localhost:8085']
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    
+    # Relabel configurations
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'memory-nexus-primary'
+    
+    # Metric relabeling
+    metric_relabel_configs:
+      # Keep only relevant metrics
+      - source_labels: [__name__]
+        regex: '(memory_nexus_|tokio_|process_|rust_|http_).*'
+        action: keep
+      
+      # Add component labels
+      - source_labels: [__name__]
+        regex: 'memory_nexus_pipeline_(.+)_.*'
+        target_label: component
+        replacement: '$1'
+      
+      # Add operation labels
+      - source_labels: [__name__]
+        regex: 'memory_nexus_.*_(.+)_duration_seconds'
+        target_label: operation
+        replacement: '$1'
+
+  # SIMD Operations Metrics
+  - job_name: 'simd-operations'
+    static_configs:
+      - targets: ['localhost:8085']
+    metrics_path: '/metrics'
+    params:
+      module: ['simd']
+    scrape_interval: 5s
+    
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '.*simd.*'
+        action: keep
+
+  # Cache Performance Metrics
+  - job_name: 'cache-metrics'
+    static_configs:
+      - targets: ['localhost:8085']
+    metrics_path: '/metrics'
+    params:
+      module: ['cache']
+    scrape_interval: 10s
+    
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '.*(cache|eviction|hit_rate).*'
+        action: keep
+
+  # Database Connection Pool Metrics
+  - job_name: 'database-pool'
+    static_configs:
+      - targets: ['localhost:8085']
+    metrics_path: '/metrics'
+    params:
+      module: ['database']
+    scrape_interval: 15s
+    
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '.*(connection|pool|circuit_breaker).*'
+        action: keep
+
+  # Router Performance Metrics
+  - job_name: 'intelligent-router'
+    static_configs:
+      - targets: ['localhost:8085']
+    metrics_path: '/metrics'
+    params:
+      module: ['router']
+    scrape_interval: 5s
+    
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: '.*(router|routing|complexity|domain).*'
+        action: keep
+
+  # Node Exporter (System Metrics)
+  - job_name: 'node'
+    static_configs:
+      - targets: ['localhost:9100']
+    
+    metric_relabel_configs:
+      # Keep only essential system metrics
+      - source_labels: [__name__]
+        regex: 'node_(cpu|memory|disk|network|filesystem).*'
+        action: keep
+
+  # Qdrant Vector Database
+  - job_name: 'qdrant'
+    static_configs:
+      - targets: ['localhost:6333']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+  # SurrealDB
+  - job_name: 'surrealdb'
+    static_configs:
+      - targets: ['localhost:8000']
+    metrics_path: '/metrics'
+    scrape_interval: 30s
+
+# Recording rules for derived metrics
+# These will be configured in separate rule files

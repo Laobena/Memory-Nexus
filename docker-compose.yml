@@ -1,46 +1,52 @@
-# Memory Nexus v1 - Complete Infrastructure Stack
-# Separate containers for each service like original Memory Nexus
+# Memory Nexus: Unified Adaptive Pipeline Architecture
+# Complete infrastructure for dual-mode operation
 
 networks:
-  memory-nexus-v1-network:
+  memory-nexus-network:
     driver: bridge
 
 services:
-  # Memory Nexus v1 Main Application
-  memory-nexus-v1:
+  # Memory Nexus Pipeline Application
+  memory-nexus:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: memory-nexus-v1-app
+    container_name: memory-nexus-app
     ports:
-      - "8085:8081"  # Different port from test/dev services
+      - "8086:8086"  # Main API port
+      - "9090:9090"  # Metrics port
     networks:
-      - memory-nexus-v1-network
+      - memory-nexus-network
     depends_on:
-      - ollama-v1
-      - qdrant-v1
-      - surrealdb-v1
+      - ollama
+      - qdrant
+      - surrealdb
+      - redis
     environment:
-      - OLLAMA_URL=http://memory-nexus-v1-ollama:11434
-      - QDRANT_URL=http://memory-nexus-v1-qdrant:6333
-      - SURREALDB_URL=http://memory-nexus-v1-surrealdb:8000
+      - RUST_LOG=info,memory_nexus_pipeline=debug
+      - OLLAMA_URL=http://ollama:11434
+      - QDRANT_URL=http://qdrant:6333
+      - SURREALDB_URL=http://surrealdb:8000
+      - REDIS_URL=redis://redis:6379
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8086
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:8086/health"]
       interval: 30s
       timeout: 10s
       retries: 3
 
-  # Ollama AI Service for Memory Nexus v1
-  ollama-v1:
+  # Ollama AI Service
+  ollama:
     image: ollama/ollama:latest
-    container_name: memory-nexus-v1-ollama
+    container_name: memory-nexus-ollama
     ports:
-      - "11440:11434"  # Unique external port
+      - "11434:11434"
     networks:
-      - memory-nexus-v1-network
+      - memory-nexus-network
     volumes:
-      - ollama-v1-data:/root/.ollama
+      - ollama-data:/root/.ollama
     environment:
       - OLLAMA_ORIGINS=*
       - OLLAMA_HOST=0.0.0.0
@@ -51,17 +57,17 @@ services:
     #   test: ["CMD", "echo", "Ollama health check disabled"]
     #   interval: 30s
 
-  # Qdrant Vector Database for Memory Nexus v1
-  qdrant-v1:
+  # Qdrant Vector Database
+  qdrant:
     image: qdrant/qdrant:latest
-    container_name: memory-nexus-v1-qdrant
+    container_name: memory-nexus-qdrant
     ports:
-      - "6341:6333"  # HTTP API
-      - "6342:6334"  # gRPC API
+      - "6333:6333"  # HTTP API
+      - "6334:6334"  # gRPC API
     networks:
-      - memory-nexus-v1-network
+      - memory-nexus-network
     volumes:
-      - qdrant-v1-data:/qdrant/storage
+      - qdrant-data:/qdrant/storage
     environment:
       - QDRANT__SERVICE__HTTP_PORT=6333
       - QDRANT__SERVICE__GRPC_PORT=6334
@@ -75,17 +81,17 @@ services:
     #   timeout: 10s
     #   retries: 3
 
-  # SurrealDB Graph Database for Memory Nexus v1
-  surrealdb-v1:
+  # SurrealDB Graph Database
+  surrealdb:
     image: surrealdb/surrealdb:latest
-    container_name: memory-nexus-v1-surrealdb
+    container_name: memory-nexus-surrealdb
     command: start --log trace --user root --pass root memory --bind 0.0.0.0:8000
     ports:
-      - "8005:8000"  # Unique external port
+      - "8000:8000"
     networks:
-      - memory-nexus-v1-network
+      - memory-nexus-network
     volumes:
-      - surrealdb-v1-data:/data
+      - surrealdb-data:/data
     environment:
       - SURREAL_LOG=trace
       - SURREAL_USER=root
@@ -97,10 +103,29 @@ services:
     #   test: ["CMD", "echo", "SurrealDB health check disabled"]
     #   interval: 30s
 
+  # Redis Cache (Optional)
+  redis:
+    image: redis:7-alpine
+    container_name: memory-nexus-redis
+    ports:
+      - "6379:6379"
+    networks:
+      - memory-nexus-network
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 volumes:
-  ollama-v1-data:
+  ollama-data:
     driver: local
-  qdrant-v1-data:
+  qdrant-data:
     driver: local
-  surrealdb-v1-data:
+  surrealdb-data:
+    driver: local
+  redis-data:
     driver: local
