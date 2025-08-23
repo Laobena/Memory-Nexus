@@ -2,6 +2,7 @@
 /// Routes 70% cache-only, 25% smart routing, 4% full pipeline, 1% maximum intelligence
 
 use crate::core::hash_utils::{ahash_string, generate_pipeline_cache_key};
+use crate::ai::{EmbeddingService, EmbeddingConfig};
 use ahash::AHashMap;
 use once_cell::sync::Lazy;
 use regex::Regex;
@@ -28,16 +29,88 @@ pub enum ComplexityLevel {
     Critical, // Medical, legal, financial - always maximum
 }
 
+/// Query intent for adaptive scoring
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueryIntent {
+    Debug,    // Error fixing queries
+    Learn,    // Concept understanding
+    Lookup,   // Quick fact retrieval
+    Build,    // Implementation help
+    Unknown,  // Unclassified
+}
+
+/// Adaptive scoring weights based on intent
+#[derive(Debug, Clone)]
+pub struct ScoringWeights {
+    pub semantic: f32,
+    pub bm25: f32,
+    pub recency: f32,
+    pub importance: f32,
+    pub context: f32,
+}
+
+impl ScoringWeights {
+    pub fn for_intent(intent: QueryIntent) -> Self {
+        match intent {
+            QueryIntent::Debug => Self {
+                semantic: 0.40,
+                bm25: 0.30,
+                recency: 0.20,
+                importance: 0.05,
+                context: 0.05,
+            },
+            QueryIntent::Learn => Self {
+                semantic: 0.50,
+                bm25: 0.15,
+                recency: 0.10,
+                importance: 0.15,
+                context: 0.10,
+            },
+            QueryIntent::Lookup => Self {
+                semantic: 0.20,
+                bm25: 0.50,
+                recency: 0.10,
+                importance: 0.10,
+                context: 0.10,
+            },
+            QueryIntent::Build => Self {
+                semantic: 0.35,
+                bm25: 0.25,
+                recency: 0.15,
+                importance: 0.15,
+                context: 0.10,
+            },
+            QueryIntent::Unknown => Self {
+                semantic: 0.35,
+                bm25: 0.25,
+                recency: 0.15,
+                importance: 0.15,
+                context: 0.10,
+            },
+        }
+    }
+}
+
 /// Query analysis result with all decision factors
 #[derive(Debug, Clone)]
 pub struct QueryAnalysis {
+    pub query: QueryInfo,
     pub complexity: ComplexityLevel,
     pub cache_probability: f32,
     pub routing_path: RoutingPath,
     pub confidence: f32,
     pub domain: QueryDomain,
     pub features: QueryFeatures,
+    pub intent: QueryIntent,
+    pub scoring_weights: ScoringWeights,
+    pub embedding: Option<crate::core::types::ConstVector<1024>>,
     pub analysis_time_us: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct QueryInfo {
+    pub text: String,
+    pub id: uuid::Uuid,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -84,6 +157,23 @@ static TEMPORAL_PATTERNS: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"\b(today|yesterday|tomorrow|now|current|latest|recent|time|date|when)\b").unwrap()
 });
 
+// Intent detection patterns
+static DEBUG_INTENT_PATTERNS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(error|bug|fix|broken|crash|fail|exception|debug|troubleshoot|issue|problem|wrong|not working|segfault|stack trace|traceback)\b").unwrap()
+});
+
+static LEARN_INTENT_PATTERNS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(learn|understand|explain|what is|how does|why|concept|theory|tutorial|guide|introduction|basics|fundamentals)\b").unwrap()
+});
+
+static LOOKUP_INTENT_PATTERNS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(find|search|where|location|definition|meaning|documentation|reference|spec|api|syntax|command)\b").unwrap()
+});
+
+static BUILD_INTENT_PATTERNS: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\b(build|create|implement|develop|code|write|make|construct|design|architecture|integrate|setup)\b").unwrap()
+});
+
 /// Cache statistics for probability calculation
 #[derive(Default)]
 pub struct CacheStatistics {
@@ -117,6 +207,7 @@ pub struct IntelligentRouter {
     domain_keywords: Arc<AHashMap<&'static str, QueryDomain>>,
     cache_stats: Arc<CacheStatistics>,
     routing_stats: Arc<RoutingStatistics>,
+    embedding_service: Arc<EmbeddingService>,
     config: RouterConfig,
 }
 
@@ -181,22 +272,31 @@ impl IntelligentRouter {
             domain_keywords.insert(*word, QueryDomain::Technical);
         }
         
+        let embedding_config = EmbeddingConfig::default();
+        let embedding_service = Arc::new(EmbeddingService::new(embedding_config));
+        
         Self {
             domain_keywords: Arc::new(domain_keywords),
             cache_stats: Arc::new(CacheStatistics::default()),
             routing_stats: Arc::new(RoutingStatistics::default()),
+            embedding_service,
             config,
         }
     }
 
-    /// Analyze query in <0.2ms with all optimizations
+    /// Analyze query in <0.2ms with all optimizations (embedding generation is async)
     #[inline(always)]
-    pub fn analyze(&self, query: &str) -> QueryAnalysis {
+    pub async fn analyze(&self, query: &str) -> QueryAnalysis {
         let start = Instant::now();
+        let query_id = uuid::Uuid::new_v4();
         
         // Fast path for very short queries
         if query.len() < 10 {
-            let analysis = self.fast_path_analysis(query);
+            let mut analysis = self.fast_path_analysis(query);
+            analysis.query = QueryInfo {
+                text: query.to_string(),
+                id: query_id,
+            };
             self.record_analysis_time(start.elapsed().as_micros() as u64);
             return analysis;
         }
@@ -219,26 +319,50 @@ impl IntelligentRouter {
         // Calculate confidence
         let confidence = self.calculate_confidence(&features, cache_probability, &complexity);
         
+        // Detect query intent for adaptive scoring
+        let intent = self.detect_intent(query);
+        let scoring_weights = ScoringWeights::for_intent(intent);
+        
+        // Generate embedding asynchronously (only for non-cache-only paths)
+        let embedding = if routing_path != RoutingPath::CacheOnly {
+            match self.embedding_service.generate_const_vector(query).await {
+                Ok(emb) => Some(emb),
+                Err(e) => {
+                    tracing::warn!("Failed to generate embedding: {}", e);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
         let analysis_time_us = start.elapsed().as_micros() as u64;
         
         // Debug assert to ensure we meet timing requirements
         debug_assert!(
-            analysis_time_us <= self.config.max_analysis_time_us,
+            analysis_time_us <= self.config.max_analysis_time_us * 2, // Allow 2x for embedding
             "Analysis took {}μs, exceeding limit of {}μs",
             analysis_time_us,
-            self.config.max_analysis_time_us
+            self.config.max_analysis_time_us * 2
         );
         
         self.record_analysis_time(analysis_time_us);
         self.update_routing_stats(&routing_path);
         
         QueryAnalysis {
+            query: QueryInfo {
+                text: query.to_string(),
+                id: query_id,
+            },
             complexity,
             cache_probability,
             routing_path,
             confidence,
             domain,
             features,
+            intent,
+            scoring_weights,
+            embedding,
             analysis_time_us,
         }
     }
@@ -252,14 +376,53 @@ impl IntelligentRouter {
             ..Default::default()
         };
         
+        let intent = self.detect_intent(query);
+        let scoring_weights = ScoringWeights::for_intent(intent);
+        
         QueryAnalysis {
+            query: QueryInfo {
+                text: String::new(),  // Will be filled by caller
+                id: uuid::Uuid::nil(),  // Will be filled by caller
+            },
             complexity: ComplexityLevel::Simple,
             cache_probability: 0.9,
             routing_path: RoutingPath::CacheOnly,
             confidence: 0.95,
             domain: QueryDomain::General,
             features,
+            intent,
+            scoring_weights,
+            embedding: None,
             analysis_time_us: 5, // Fast path typically <5μs
+        }
+    }
+    
+    /// Detect query intent for adaptive scoring
+    #[inline(always)]
+    fn detect_intent(&self, query: &str) -> QueryIntent {
+        let query_lower = query.to_lowercase();
+        
+        // Count matches for each intent
+        let debug_score = if DEBUG_INTENT_PATTERNS.is_match(&query_lower) { 1.0 } else { 0.0 };
+        let learn_score = if LEARN_INTENT_PATTERNS.is_match(&query_lower) { 1.0 } else { 0.0 };
+        let lookup_score = if LOOKUP_INTENT_PATTERNS.is_match(&query_lower) { 1.0 } else { 0.0 };
+        let build_score = if BUILD_INTENT_PATTERNS.is_match(&query_lower) { 1.0 } else { 0.0 };
+        
+        // Return intent with highest score
+        let max_score = debug_score.max(learn_score).max(lookup_score).max(build_score);
+        
+        if max_score == 0.0 {
+            QueryIntent::Unknown
+        } else if debug_score == max_score {
+            QueryIntent::Debug
+        } else if learn_score == max_score {
+            QueryIntent::Learn
+        } else if lookup_score == max_score {
+            QueryIntent::Lookup
+        } else if build_score == max_score {
+            QueryIntent::Build
+        } else {
+            QueryIntent::Unknown
         }
     }
 

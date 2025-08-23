@@ -6,7 +6,8 @@ use dashmap::DashMap;
 use std::sync::Arc;
 use parking_lot::RwLock;
 use rayon::prelude::*;
-use std::collections::{HashSet, HashMap};
+use std::collections::{HashSet, HashMap, BinaryHeap};
+use std::cmp::Ordering;
 use std::time::Instant;
 use ahash::AHashSet;
 use tracing::{debug, instrument};
@@ -131,7 +132,7 @@ impl FusionEngine {
         Ok(final_results)
     }
     
-    /// Fuse SearchResults into ProcessedResults with component scoring
+    /// Fuse SearchResults into ProcessedResults with 5-factor scoring integration
     pub async fn fuse_search_results(
         &self,
         search_results: Vec<crate::pipeline::search_orchestrator::SearchResult>,
@@ -139,18 +140,27 @@ impl FusionEngine {
     ) -> Result<Vec<ProcessedResult>> {
         let start = Instant::now();
         
-        // Convert SearchResults to ProcessedResults
+        // Convert SearchResults to ProcessedResults, preserving 5-factor scores
         let processed: Vec<ProcessedResult> = search_results
             .into_par_iter()
-            .map(|sr| ProcessedResult {
-                score: sr.score,
-                content: sr.content,
-                source: crate::core::types::DataSource::Database,
-                metadata: sr.metadata,
+            .map(|sr| {
+                let mut result = ProcessedResult {
+                    score: sr.score,
+                    content: sr.content,
+                    source: crate::core::types::DataSource::Database,
+                    metadata: sr.metadata.clone(),
+                };
+                
+                // Inject 5-factor scores into metadata for reranking
+                if let Some(five_factor) = sr.metadata.get("five_factor_scores") {
+                    result.metadata.insert("five_factor_scores".to_string(), five_factor.clone());
+                }
+                
+                result
             })
             .collect();
         
-        // Apply intelligent fusion
+        // Apply intelligent fusion with 5-factor awareness
         let fused = self.fuse(processed).await?;
         
         // Select top-k using efficient selection
@@ -199,22 +209,83 @@ impl FusionEngine {
     async fn rerank(&self, mut results: Vec<ProcessedResult>) -> Result<Vec<ProcessedResult>> {
         let matrix = self.scoring_matrix.read().clone();
         
-        // Compute 6-factor composite scores in parallel
+        // Compute composite scores in parallel, integrating 5-factor when available
         results.par_iter_mut().for_each(|result| {
-            let relevance = result.score;
-            let freshness = compute_freshness_score(&result.metadata);
-            let diversity = compute_diversity_score(&result.content);
-            let authority = compute_authority_score(&result.metadata);
-            let coherence = compute_coherence_score(&result.metadata);
-            let confidence = compute_confidence_score(result.score, &result.metadata);
-            
-            result.score = 
-                relevance * matrix.relevance +
-                freshness * matrix.freshness +
-                diversity * matrix.diversity +
-                authority * matrix.authority +
-                coherence * matrix.coherence +
-                confidence * matrix.confidence;
+            // Check if we have 5-factor scores from the search orchestrator
+            if let Some(five_factor_value) = result.metadata.get("five_factor_scores") {
+                // Use our advanced 5-factor scoring
+                if let Some(scores) = five_factor_value.as_object() {
+                    let semantic = scores.get("semantic")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let bm25 = scores.get("bm25")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let recency = scores.get("recency")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let importance = scores.get("importance")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    let context = scores.get("context")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(0.0) as f32;
+                    
+                    // Map 5-factor to enhanced 6-factor scoring
+                    // Relevance = combination of semantic and BM25
+                    let relevance = semantic * 0.6 + bm25 * 0.4;
+                    
+                    // Freshness = recency score
+                    let freshness = recency;
+                    
+                    // Authority = importance score 
+                    let authority = importance;
+                    
+                    // Diversity, coherence, confidence from existing methods
+                    let diversity = compute_diversity_score(&result.content);
+                    let coherence = compute_coherence_score(&result.metadata);
+                    
+                    // Enhanced confidence using context score
+                    let base_confidence = compute_confidence_score(result.score, &result.metadata);
+                    let confidence = (base_confidence + context) / 2.0;
+                    
+                    // Apply the unified scoring matrix
+                    result.score = 
+                        relevance * matrix.relevance +
+                        freshness * matrix.freshness +
+                        diversity * matrix.diversity +
+                        authority * matrix.authority +
+                        coherence * matrix.coherence +
+                        confidence * matrix.confidence;
+                    
+                    // Mark as 5-factor enhanced
+                    result.metadata.insert(
+                        "scoring_method".to_string(),
+                        serde_json::json!("5-factor-enhanced")
+                    );
+                }
+            } else {
+                // Fallback to original 6-factor scoring
+                let relevance = result.score;
+                let freshness = compute_freshness_score(&result.metadata);
+                let diversity = compute_diversity_score(&result.content);
+                let authority = compute_authority_score(&result.metadata);
+                let coherence = compute_coherence_score(&result.metadata);
+                let confidence = compute_confidence_score(result.score, &result.metadata);
+                
+                result.score = 
+                    relevance * matrix.relevance +
+                    freshness * matrix.freshness +
+                    diversity * matrix.diversity +
+                    authority * matrix.authority +
+                    coherence * matrix.coherence +
+                    confidence * matrix.confidence;
+                
+                result.metadata.insert(
+                    "scoring_method".to_string(),
+                    serde_json::json!("6-factor-standard")
+                );
+            }
         });
         
         // Sort by composite score

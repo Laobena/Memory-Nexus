@@ -39,7 +39,7 @@ pub use lock_free_cache::{
 
 // SIMD operations exports
 pub use simd_ops::{
-    CpuFeatures, SimdOps, get_simd_stats, reset_simd_stats,
+    CpuFeatures as SimdCpuFeatures, SimdOps, get_simd_stats, reset_simd_stats,
 };
 
 // Core types exports

@@ -77,9 +77,14 @@ impl UnifiedPipeline {
     ) -> Result<Self> {
         info!("🚀 Initializing Unified Adaptive Pipeline");
         
+        // Initialize preprocessor with embedding service
+        let preprocessor = Arc::new(ParallelPreprocessor::new());
+        preprocessor.initialize().await
+            .context("Failed to initialize preprocessor with embedding service")?;
+        
         Ok(Self {
             router: Arc::new(IntelligentRouter::new()),
-            preprocessor: Arc::new(ParallelPreprocessor::new()),
+            preprocessor,
             storage: Arc::new(StorageEngine::new()),
             search: Arc::new(SearchOrchestrator::new()),
             fusion: Arc::new(FusionEngine::new()),
@@ -103,7 +108,7 @@ impl UnifiedPipeline {
         debug!("Processing query {} with adaptive pipeline", query_id);
         
         // Step 1: Analyze query complexity (<0.2ms)
-        let analysis = self.router.analyze_query(&query);
+        let analysis = self.router.analyze(&query).await;
         self.metrics.record_routing_decision(&analysis.routing_path);
         
         info!("Query {} routed to {:?} path (complexity: {:?}, cache_prob: {:.2})", 

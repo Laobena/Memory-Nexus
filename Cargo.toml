@@ -250,13 +250,12 @@ cached-disk = ["cached/disk_store"]
 debug-tools = ["color-eyre"]
 
 # ===== WORKSPACE =====
-# [workspace]
-# resolver = "2"
-# members = [
-#     ".",
-#     "crates/database-adapters",
-#     "crates/sync-engine",
-# ]
+[workspace]
+resolver = "2"
+members = [
+    ".",
+    "nexus-blocks",
+]
 
 # [workspace.dependencies]
 # # Core runtime

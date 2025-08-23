@@ -7,7 +7,8 @@ use crate::core::simd_ops::SimdOps;
 use crate::core::lock_free_cache::{LockFreeCache, CacheConfig, WorkStealingQueue};
 use crate::database::enhanced_pool::EnhancedConnectionPool;
 use crate::database::database_connections::UnifiedDatabasePool;
-use crate::pipeline::intelligent_router::QueryAnalysis;
+use crate::pipeline::intelligent_router::{QueryAnalysis, QueryIntent, ScoringWeights};
+use crate::search::bm25_scorer::QuickBM25;
 use crossbeam::channel::{bounded, unbounded, Sender, Receiver};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -18,15 +19,40 @@ use tokio::time::timeout;
 use serde::{Deserialize, Serialize};
 use ahash::RandomState;
 
-/// Search result from any source
+/// Five-factor scoring signals
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchSignals {
+    pub semantic_similarity: f32,  // Vector cosine similarity (0.0-1.0)
+    pub bm25_score: f32,           // Enhanced BM25+ keyword relevance
+    pub recency_score: f32,        // Temporal relevance with decay
+    pub importance_score: f32,     // Historical importance + ratings
+    pub context_score: f32,        // Project/tech stack relevance
+}
+
+impl Default for SearchSignals {
+    fn default() -> Self {
+        Self {
+            semantic_similarity: 0.0,
+            bm25_score: 0.0,
+            recency_score: 0.5,
+            importance_score: 0.5,
+            context_score: 0.5,
+        }
+    }
+}
+
+/// Search result from any source with 5-factor scoring
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SearchResult {
     pub id: String,
     pub content: String,
-    pub score: f32,
+    pub score: f32,                     // Original score from source
+    pub five_factor_score: f32,         // NEW: Weighted 5-factor score
+    pub signals: SearchSignals,         // NEW: Individual signal scores
     pub source: SearchSource,
     pub metadata: serde_json::Value,
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub created_at: chrono::DateTime<chrono::Utc>,  // NEW: For recency scoring
     pub confidence: f32,
 }
 
@@ -98,6 +124,121 @@ struct EnginePool {
     intelligence: Arc<IntelligenceEngine>,
     learning: Arc<LearningEngine>,
     mining: Arc<MiningEngine>,
+}
+
+/// Five-factor scorer for intelligent result ranking
+pub struct FiveFactorScorer {
+    query: String,
+    query_embedding: Option<Vec<f32>>,
+    intent: QueryIntent,
+    weights: ScoringWeights,
+    bm25_scorer: QuickBM25,  // NEW: Proper BM25+ scorer
+}
+
+impl FiveFactorScorer {
+    pub fn new(query: String, query_embedding: Option<Vec<f32>>, intent: QueryIntent, weights: ScoringWeights) -> Self {
+        Self {
+            query,
+            query_embedding,
+            intent,
+            weights,
+            bm25_scorer: QuickBM25::new(),  // Initialize BM25+ scorer
+        }
+    }
+    
+    /// Calculate all 5 factor scores for a result
+    pub fn calculate_signals(&self, result: &mut SearchResult) -> SearchSignals {
+        let mut signals = SearchSignals::default();
+        
+        // 1. Semantic similarity (if embeddings available)
+        if let Some(query_emb) = &self.query_embedding {
+            if let Some(result_emb) = self.extract_embedding(&result.metadata) {
+                signals.semantic_similarity = SimdOps::cosine_similarity(query_emb, &result_emb);
+            }
+        }
+        
+        // 2. BM25+ score with proper term frequency saturation and IDF
+        signals.bm25_score = self.bm25_scorer.score(&self.query, &result.content);
+        
+        // 3. Recency score with exponential decay
+        signals.recency_score = self.calculate_recency_score(result.created_at);
+        
+        // 4. Importance score (from metadata or default)
+        signals.importance_score = self.extract_importance(&result.metadata);
+        
+        // 5. Context score (simplified for now)
+        signals.context_score = self.calculate_context_score(&result.content);
+        
+        signals
+    }
+    
+    /// Apply weighted 5-factor scoring
+    pub fn score_result(&self, result: &mut SearchResult) {
+        let signals = self.calculate_signals(result);
+        
+        // Calculate weighted score
+        let five_factor_score = 
+            (signals.semantic_similarity * self.weights.semantic) +
+            (signals.bm25_score * self.weights.bm25) +
+            (signals.recency_score * self.weights.recency) +
+            (signals.importance_score * self.weights.importance) +
+            (signals.context_score * self.weights.context);
+        
+        result.signals = signals;
+        result.five_factor_score = five_factor_score;
+    }
+    
+    /// Calculate recency score with exponential decay
+    fn calculate_recency_score(&self, created_at: chrono::DateTime<chrono::Utc>) -> f32 {
+        let age = chrono::Utc::now().signed_duration_since(created_at);
+        let age_days = age.num_days() as f32;
+        
+        // Exponential decay with 30-day half-life
+        (-age_days / 30.0).exp().max(0.0).min(1.0)
+    }
+    
+    /// Extract importance from metadata
+    fn extract_importance(&self, metadata: &serde_json::Value) -> f32 {
+        metadata.get("importance")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or(0.5)
+            .max(0.0)
+            .min(1.0)
+    }
+    
+    /// Calculate context relevance (simplified)
+    fn calculate_context_score(&self, content: &str) -> f32 {
+        // For now, boost technical content for technical queries
+        match self.intent {
+            QueryIntent::Debug | QueryIntent::Build => {
+                if content.contains("error") || content.contains("code") || content.contains("function") {
+                    0.8
+                } else {
+                    0.5
+                }
+            }
+            QueryIntent::Learn => {
+                if content.contains("explain") || content.contains("concept") || content.contains("guide") {
+                    0.8
+                } else {
+                    0.5
+                }
+            }
+            _ => 0.5
+        }
+    }
+    
+    /// Extract embedding from metadata if available
+    fn extract_embedding(&self, metadata: &serde_json::Value) -> Option<Vec<f32>> {
+        metadata.get("embedding")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_f64().map(|f| f as f32))
+                    .collect()
+            })
+    }
 }
 
 impl SearchOrchestrator {
@@ -183,13 +324,38 @@ impl SearchOrchestrator {
         drop(tx);
         
         // Get collected results
-        let results = collector_handle.await.unwrap_or_default();
+        let mut results = collector_handle.await.unwrap_or_default();
+        
+        // Apply 5-factor scoring to all results
+        let query_embedding = query_analysis.embedding.as_ref()
+            .map(|e| e.data.0.to_vec());
+        
+        let scorer = FiveFactorScorer::new(
+            query_analysis.query.text.clone(),
+            query_embedding,
+            query_analysis.intent,
+            query_analysis.scoring_weights.clone(),
+        );
+        
+        // Score all results in parallel
+        results.par_iter_mut().for_each(|result| {
+            scorer.score_result(result);
+        });
+        
+        // Sort by 5-factor score instead of original score
+        results.sort_by(|a, b| {
+            b.five_factor_score.partial_cmp(&a.five_factor_score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        
+        // Take only top results
+        results.truncate(self.config.max_results);
         
         let elapsed = start.elapsed();
         self.update_stats(elapsed);
         
         tracing::info!(
-            "Search completed in {:?} with {} results (target: <25ms)",
+            "Search completed in {:?} with {} results (5-factor scoring applied)",
             elapsed,
             results.len()
         );

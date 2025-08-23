@@ -1,6 +1,8 @@
 //! Pipeline processing module - Empty implementation ready for new pipeline
 
+pub mod adaptive_weights;
 pub mod channels;
+pub mod context_booster;
 pub mod fusion;
 pub mod intelligent_router;
 pub mod preprocessor;
@@ -18,8 +20,14 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // Re-export pipeline components
+pub use adaptive_weights::{
+    AdaptiveWeightOptimizer, FeedbackSignal, LearningEvent, IntentWeights, PerformanceMetrics,
+};
 pub use channels::{
     CacheOnlyChannel, SmartRoutingChannel, AdaptiveBatcher, ChannelFactory,
+};
+pub use context_booster::{
+    ContextBooster, UserContext, UserPreferences,
 };
 pub use fusion::FusionEngine;
 pub use intelligent_router::{
@@ -39,7 +47,7 @@ pub use search_orchestrator::{
 };
 pub use storage::StorageEngine;
 pub use unified_pipeline::{
-    UnifiedPipeline, PipelineConfig, PipelineResponse, FusedResult, FusedMetadata
+    UnifiedPipeline, PipelineConfig, PipelineResponse as UnifiedPipelineResponse, FusedResult, FusedMetadata
 };
 
 // Re-export main pipeline

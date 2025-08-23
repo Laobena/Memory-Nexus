@@ -1,10 +1,12 @@
-//! AI Integration Module for LocalMind Memory Hub
+//! AI Integration Module for Memory Nexus
 //!
 //! This module provides local AI processing capabilities using Ollama,
 //! maintaining 100% local processing without cloud dependencies.
 
+pub mod embedding_service;
 pub mod local_engine;
 
+pub use embedding_service::{EmbeddingService, EmbeddingConfig};
 pub use local_engine::LocalAIEngine;
 
 /// AI processing errors

@@ -6,7 +6,7 @@ use crate::core::types::*;
 use crate::core::simd_ops::SimdOps;
 use crate::core::hash_utils;
 use crate::optimizations::memory_pool::VectorPool;
-use crate::ai::ollama_client::{EmbeddingRequest, EmbeddingResponse};
+use crate::ai::{EmbeddingService, EmbeddingConfig};
 use ahash::{AHashSet, AHasher};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
@@ -97,27 +97,30 @@ pub struct ProcessingMetadata {
 /// High-performance parallel preprocessor
 pub struct ParallelPreprocessor {
     chunker: Arc<TextChunker>,
-    embedding_gen: Arc<EmbeddingGenerator>,
+    embedding_service: Arc<EmbeddingService>,
     entity_extractor: Arc<EntityExtractor>,
     deduplicator: Arc<MinHashDeduplicator>,
     vector_pool: Arc<RwLock<VectorPool>>,
-    ollama_url: String,
-    embedding_model: String,
 }
 
 impl ParallelPreprocessor {
     pub fn new() -> Self {
+        let config = EmbeddingConfig::default();
+        let embedding_service = Arc::new(EmbeddingService::new(config));
+        
         Self {
             chunker: Arc::new(TextChunker::new()),
-            embedding_gen: Arc::new(EmbeddingGenerator::new()),
+            embedding_service,
             entity_extractor: Arc::new(EntityExtractor::new()),
             deduplicator: Arc::new(MinHashDeduplicator::new(128)),
             vector_pool: Arc::new(RwLock::new(VectorPool::new())),
-            ollama_url: std::env::var("OLLAMA_URL")
-                .unwrap_or_else(|_| "http://localhost:11434".to_string()),
-            embedding_model: std::env::var("OLLAMA_EMBEDDING_MODEL")
-                .unwrap_or_else(|_| "mxbai-embed-large".to_string()),
         }
+    }
+    
+    /// Initialize the preprocessor and verify connections
+    pub async fn initialize(&self) -> crate::core::Result<()> {
+        self.embedding_service.initialize().await?;
+        Ok(())
     }
 
     /// Process text in parallel, completing in <10ms for standard queries
@@ -169,74 +172,28 @@ impl ParallelPreprocessor {
         })
     }
 
-    /// Generate embeddings using Ollama with parallel batching
+    /// Generate embeddings using our embedding service
     async fn generate_embeddings_parallel(
         &self,
         chunks: &[TextChunk],
     ) -> crate::core::Result<Vec<ConstVector<EMBEDDING_DIM>>> {
-        use reqwest::Client;
-        
         // Prepare batch request
         let texts: Vec<String> = chunks.iter().map(|c| c.text.clone()).collect();
         
-        // Call Ollama API with new /api/embed endpoint
-        let client = Client::new();
-        let request = serde_json::json!({
-            "model": self.embedding_model,
-            "input": texts,
-        });
-
-        let response = client
-            .post(format!("{}/api/embed", self.ollama_url))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await
-            .map_err(|e| crate::core::NexusError::External(format!("Ollama error: {}", e)))?;
-
-        if !response.status().is_success() {
-            return Err(crate::core::NexusError::External(format!(
-                "Ollama API error: {}",
-                response.status()
-            )));
-        }
-
-        let embed_response: serde_json::Value = response.json().await
-            .map_err(|e| crate::core::NexusError::External(format!("Parse error: {}", e)))?;
-
-        // Extract embeddings and convert to our format
-        let embeddings_raw = embed_response["embeddings"]
-            .as_array()
-            .ok_or_else(|| crate::core::NexusError::External("Invalid response format".into()))?;
-
-        let mut embeddings = Vec::with_capacity(embeddings_raw.len());
+        // Use our embedding service for batch generation
+        let embeddings = self.embedding_service.generate_batch(&texts).await?;
         
-        for embedding_arr in embeddings_raw {
-            let values: Vec<f32> = embedding_arr
-                .as_array()
-                .ok_or_else(|| crate::core::NexusError::External("Invalid embedding".into()))?
-                .iter()
-                .map(|v| v.as_f64().unwrap_or(0.0) as f32)
-                .collect();
-
-            if values.len() != EMBEDDING_DIM {
-                return Err(crate::core::NexusError::External(format!(
-                    "Invalid embedding dimension: {} (expected {})",
-                    values.len(),
-                    EMBEDDING_DIM
-                )));
-            }
-
-            // Normalize with SIMD
-            let mut normalized = values.clone();
-            SimdOps::normalize_inplace(&mut normalized);
-            
-            embeddings.push(ConstVector::new(
-                normalized.try_into().unwrap()
-            ));
-        }
-
-        Ok(embeddings)
+        // Convert to ConstVector for SIMD operations
+        let const_vectors: Vec<ConstVector<EMBEDDING_DIM>> = embeddings
+            .into_iter()
+            .map(|embedding| {
+                let mut array = [0.0f32; EMBEDDING_DIM];
+                array.copy_from_slice(&embedding);
+                ConstVector::new(array)
+            })
+            .collect();
+        
+        Ok(const_vectors)
     }
 
     fn calculate_dedup_ratio(&self, signature: &[u64]) -> f32 {
