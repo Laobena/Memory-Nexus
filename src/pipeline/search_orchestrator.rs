@@ -9,7 +9,7 @@ use crate::core::uuid_types::calculate_time_weight;
 use crate::database::enhanced_pool::EnhancedConnectionPool;
 use crate::database::database_connections::UnifiedDatabasePool;
 use crate::pipeline::intelligent_router::{QueryAnalysis, QueryIntent, ScoringWeights};
-// use crate::search::bm25_scorer::QuickBM25; // TODO: implement BM25 scorer
+use crate::search::bm25_scorer::QuickBM25;
 use crossbeam::channel::{bounded, unbounded, Sender, Receiver};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -19,6 +19,8 @@ use std::time::{Duration, Instant};
 use tokio::time::timeout;
 use serde::{Deserialize, Serialize};
 use ahash::RandomState;
+use surrealdb::sql::Thing;
+use qdrant_client::qdrant;
 
 /// Five-factor scoring signals
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -55,6 +57,17 @@ pub struct SearchResult {
     pub timestamp: chrono::DateTime<chrono::Utc>,
     pub created_at: chrono::DateTime<chrono::Utc>,  // NEW: For recency scoring
     pub confidence: f32,
+}
+
+/// SurrealDB memory record structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SurrealMemory {
+    id: Thing,
+    content: String,
+    created_at: chrono::DateTime<chrono::Utc>,
+    score: Option<f32>,
+    metadata: Option<serde_json::Value>,
+    embedding: Option<Vec<f32>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -133,7 +146,7 @@ pub struct FiveFactorScorer {
     query_embedding: Option<Vec<f32>>,
     intent: QueryIntent,
     weights: ScoringWeights,
-    // bm25_scorer: QuickBM25,  // TODO: Proper BM25+ scorer to be implemented
+    bm25_scorer: QuickBM25,
 }
 
 impl FiveFactorScorer {
@@ -143,7 +156,7 @@ impl FiveFactorScorer {
             query_embedding,
             intent,
             weights,
-            // bm25_scorer: QuickBM25::new(),  // TODO: Initialize BM25+ scorer when implemented
+            bm25_scorer: QuickBM25::new(),
         }
     }
     
@@ -159,8 +172,7 @@ impl FiveFactorScorer {
         }
         
         // 2. BM25+ score with proper term frequency saturation and IDF
-        // TODO: Implement actual BM25 scorer
-        signals.bm25_score = self.calculate_simple_bm25(&result.content);
+        signals.bm25_score = self.bm25_scorer.score(&self.query, &result.content);
         
         // 3. Recency score with exponential decay
         signals.recency_score = self.calculate_recency_score(result.created_at);
@@ -239,25 +251,7 @@ impl FiveFactorScorer {
             })
     }
     
-    /// Simple BM25-like scoring placeholder
-    fn calculate_simple_bm25(&self, content: &str) -> f32 {
-        // Simple keyword matching until proper BM25 is implemented
-        let query_terms: Vec<&str> = self.query.split_whitespace().collect();
-        let content_lower = content.to_lowercase();
-        let mut matches = 0;
-        
-        for term in &query_terms {
-            if content_lower.contains(&term.to_lowercase()) {
-                matches += 1;
-            }
-        }
-        
-        if query_terms.is_empty() {
-            0.5
-        } else {
-            (matches as f32 / query_terms.len() as f32).min(1.0)
-        }
-    }
+    // BM25 scoring is now handled by the QuickBM25 scorer
 }
 
 impl SearchOrchestrator {
@@ -291,6 +285,52 @@ impl SearchOrchestrator {
                 _padding: [0; 40],
             }),
         }
+    }
+    
+    /// Direct cache lookup by key (fastest path for CacheOnly)
+    pub async fn get_cached_result(&self, cache_key: &str) -> Option<FusedResult> {
+        // Try L1 cache first (fastest)
+        if let Some(result) = self.cache.get(cache_key).await {
+            self.stats.cache_hits.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(FusedResult {
+                id: result.id,
+                content: result.content,
+                score: result.score,
+                confidence: result.confidence,
+                metadata: FusedMetadata {
+                    source: result.source.to_string(),
+                    cross_validation_score: result.confidence,
+                    timestamp: result.timestamp,
+                    processing_time_ms: 0,
+                    fusion_method: "cache_direct".to_string(),
+                },
+            });
+        }
+        None
+    }
+    
+    /// Cache-only search with pre-computed embedding
+    pub async fn search_cache_only_with_embedding(
+        &self,
+        embedding: &ConstVector<EMBEDDING_DIM>,
+    ) -> Vec<SearchResult> {
+        let start = Instant::now();
+        
+        // For cache-only path, we just do a simple similarity check
+        // This is a placeholder - in production you'd have a proper vector cache
+        // For now, we'll return empty results (cache miss)
+        let results = Vec::new();
+        
+        debug!("Cache-only search completed in {:?} with {} results", 
+               start.elapsed(), results.len());
+        
+        results
+    }
+    
+    /// Cache-only search without embedding (fallback)
+    pub async fn search_cache_only(&self, embedding: &[f32]) -> Vec<SearchResult> {
+        // For now, just return empty results (cache miss)
+        Vec::new()
     }
 
     /// Execute parallel search across all sources with <25ms target
@@ -483,24 +523,307 @@ impl SearchOrchestrator {
         ).await;
     }
 
-    /// Search SurrealDB with graph traversal
+    /// Search SurrealDB with graph traversal and full-text search
     async fn search_surrealdb(
         db_pool: &UnifiedDatabasePool,
         query_analysis: &QueryAnalysis,
     ) -> Vec<SearchResult> {
-        // TODO: Implement actual SurrealDB search
-        // This would use the connection pool to execute graph queries
-        vec![]
+        let start = Instant::now();
+        let mut results = Vec::new();
+        
+        // Get SurrealDB connection
+        if let Ok(conn) = db_pool.get_surrealdb().await {
+            let client = conn.client();
+            
+            // 1. Full-text search with BM25 scoring
+            let text_search_query = format!(
+                r#"
+                SELECT 
+                    id,
+                    content,
+                    search::score(1) AS score,
+                    created_at,
+                    metadata,
+                    embedding
+                FROM memory
+                WHERE content @@ $query
+                ORDER BY score DESC
+                LIMIT 20
+                "#
+            );
+            
+            if let Ok(mut response) = client
+                .query(text_search_query)
+                .bind(("query", &query_analysis.query.text))
+                .await 
+            {
+                if let Ok(memories) = response.take::<Vec<SurrealMemory>>(0) {
+                    for mem in memories {
+                        results.push(SearchResult {
+                            id: mem.id.to_string(),
+                            content: mem.content,
+                            score: mem.score.unwrap_or(0.0),
+                            five_factor_score: 0.0, // Will be calculated later
+                            signals: SearchSignals::default(),
+                            source: SearchSource::SurrealDB,
+                            metadata: mem.metadata.unwrap_or_default(),
+                            timestamp: chrono::Utc::now(),
+                            created_at: mem.created_at,
+                            confidence: 0.8,
+                        });
+                    }
+                }
+            }
+            
+            // 2. Graph traversal for related memories (if we have parent UUID)
+            if let Some(parent_id) = query_analysis.parent_uuid {
+                let graph_query = format!(
+                    r#"
+                    SELECT 
+                        id,
+                        content,
+                        created_at,
+                        metadata,
+                        0.9 AS score
+                    FROM memory
+                    WHERE id IN (
+                        SELECT ->evolves_to->memory.id FROM memory:$parent
+                        UNION
+                        SELECT ->related_to->memory.id FROM memory:$parent
+                        UNION
+                        SELECT <-evolves_to<-memory.id FROM memory:$parent
+                    )
+                    LIMIT 10
+                    "#
+                );
+                
+                if let Ok(mut response) = client
+                    .query(graph_query)
+                    .bind(("parent", format!("memory:{}", parent_id)))
+                    .await
+                {
+                    if let Ok(related) = response.take::<Vec<SurrealMemory>>(0) {
+                        for mem in related {
+                            results.push(SearchResult {
+                                id: mem.id.to_string(),
+                                content: mem.content,
+                                score: mem.score.unwrap_or(0.9),
+                                five_factor_score: 0.0,
+                                signals: SearchSignals::default(),
+                                source: SearchSource::SurrealDB,
+                                metadata: mem.metadata.unwrap_or_default(),
+                                timestamp: chrono::Utc::now(),
+                                created_at: mem.created_at,
+                                confidence: 0.85,
+                            });
+                        }
+                    }
+                }
+            }
+            
+            // 3. Pattern-based search for technical terms
+            if query_analysis.intent == QueryIntent::Technical {
+                let pattern_query = format!(
+                    r#"
+                    SELECT 
+                        id,
+                        content,
+                        created_at,
+                        metadata,
+                        0.75 AS score
+                    FROM memory
+                    WHERE content CONTAINS ANY $terms
+                    ORDER BY created_at DESC
+                    LIMIT 15
+                    "#
+                );
+                
+                // Extract technical terms from query
+                let terms: Vec<&str> = query_analysis.query.text
+                    .split_whitespace()
+                    .filter(|w| w.len() > 3)
+                    .collect();
+                
+                if !terms.is_empty() {
+                    if let Ok(mut response) = client
+                        .query(pattern_query)
+                        .bind(("terms", terms))
+                        .await
+                    {
+                        if let Ok(pattern_results) = response.take::<Vec<SurrealMemory>>(0) {
+                            for mem in pattern_results {
+                                // Avoid duplicates
+                                if !results.iter().any(|r| r.id == mem.id.to_string()) {
+                                    results.push(SearchResult {
+                                        id: mem.id.to_string(),
+                                        content: mem.content,
+                                        score: mem.score.unwrap_or(0.75),
+                                        five_factor_score: 0.0,
+                                        signals: SearchSignals::default(),
+                                        source: SearchSource::SurrealDB,
+                                        metadata: mem.metadata.unwrap_or_default(),
+                                        timestamp: chrono::Utc::now(),
+                                        created_at: mem.created_at,
+                                        confidence: 0.7,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            debug!("SurrealDB search completed in {:?} with {} results", 
+                   start.elapsed(), results.len());
+        }
+        
+        results
     }
 
-    /// Search Qdrant with vector similarity using SIMD
+    /// Search Qdrant with vector similarity using SIMD and binary quantization
     async fn search_qdrant(
         db_pool: &UnifiedDatabasePool,
         embeddings: &[ConstVector<EMBEDDING_DIM>],
     ) -> Vec<SearchResult> {
-        // TODO: Implement actual Qdrant search
-        // This would use HNSW index for fast vector search
-        vec![]
+        let start = Instant::now();
+        let mut results = Vec::new();
+        
+        // Get Qdrant connection
+        if let Ok(conn) = db_pool.get_qdrant().await {
+            let client = conn.client();
+            
+            // Use the first embedding for primary search
+            if let Some(primary_embedding) = embeddings.first() {
+                // Convert to binary for initial fast filtering (32x compression)
+                let binary_embedding = crate::core::binary_embeddings::BinaryEmbedding::from_float_embedding(
+                    &primary_embedding.data[..]
+                );
+                
+                // 1. Binary quantized search for candidate selection (ultra-fast)
+                let binary_search_request = qdrant_client::qdrant::SearchPointsBuilder::new(
+                    "memories".to_string(),
+                    primary_embedding.data.to_vec(),
+                    100,  // Get more candidates for reranking
+                )
+                .with_payload(true)
+                .params(qdrant_client::qdrant::SearchParamsBuilder::default()
+                    .quantization(qdrant_client::qdrant::QuantizationSearchParams {
+                        ignore: Some(false),
+                        rescore: Some(true),  // Rescore with full precision
+                        oversampling: Some(2.0),  // 2x oversampling for better accuracy
+                    })
+                    .hnsw_ef(128)  // Higher ef for better recall
+                    .exact(false)  // Use approximate search
+                    .build()
+                )
+                .build();
+                
+                match client.search_points(binary_search_request).await {
+                    Ok(search_response) => {
+                        for point in search_response.result {
+                            // Extract metadata from payload
+                            let metadata = point.payload
+                                .get("metadata")
+                                .and_then(|v| serde_json::to_value(v).ok())
+                                .unwrap_or_default();
+                            
+                            let content = point.payload
+                                .get("content")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .unwrap_or_default();
+                            
+                            let created_at = point.payload
+                                .get("created_at")
+                                .and_then(|v| v.as_str())
+                                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                .map(|dt| dt.with_timezone(&chrono::Utc))
+                                .unwrap_or_else(chrono::Utc::now);
+                            
+                            results.push(SearchResult {
+                                id: point.id.to_string(),
+                                content,
+                                score: point.score,
+                                five_factor_score: 0.0,  // Will be calculated later
+                                signals: SearchSignals::default(),
+                                source: SearchSource::Qdrant,
+                                metadata,
+                                timestamp: chrono::Utc::now(),
+                                created_at,
+                                confidence: 0.85,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Qdrant search error: {}", e);
+                    }
+                }
+                
+                // 2. If we have multiple embeddings, search with them too (multi-vector search)
+                if embeddings.len() > 1 {
+                    for (idx, embedding) in embeddings.iter().enumerate().skip(1).take(2) {
+                        let multi_search = qdrant_client::qdrant::SearchPointsBuilder::new(
+                            "memories".to_string(),
+                            embedding.data.to_vec(),
+                            20,  // Fewer results for secondary embeddings
+                        )
+                        .with_payload(true)
+                        .params(qdrant_client::qdrant::SearchParamsBuilder::default()
+                            .quantization(qdrant_client::qdrant::QuantizationSearchParams {
+                                ignore: Some(false),
+                                rescore: Some(true),
+                                oversampling: Some(1.5),
+                            })
+                            .build()
+                        )
+                        .build();
+                        
+                        if let Ok(response) = client.search_points(multi_search).await {
+                            for point in response.result {
+                                // Avoid duplicates
+                                if !results.iter().any(|r| r.id == point.id.to_string()) {
+                                    let metadata = point.payload
+                                        .get("metadata")
+                                        .and_then(|v| serde_json::to_value(v).ok())
+                                        .unwrap_or_default();
+                                    
+                                    let content = point.payload
+                                        .get("content")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.to_string())
+                                        .unwrap_or_default();
+                                    
+                                    let created_at = point.payload
+                                        .get("created_at")
+                                        .and_then(|v| v.as_str())
+                                        .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+                                        .map(|dt| dt.with_timezone(&chrono::Utc))
+                                        .unwrap_or_else(chrono::Utc::now);
+                                    
+                                    results.push(SearchResult {
+                                        id: point.id.to_string(),
+                                        content,
+                                        score: point.score * 0.8,  // Slightly lower weight for secondary embeddings
+                                        five_factor_score: 0.0,
+                                        signals: SearchSignals::default(),
+                                        source: SearchSource::Qdrant,
+                                        metadata,
+                                        timestamp: chrono::Utc::now(),
+                                        created_at,
+                                        confidence: 0.75,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            
+            debug!("Qdrant search completed in {:?} with {} results", 
+                   start.elapsed(), results.len());
+        }
+        
+        results
     }
 
     /// Search specialized engines with work-stealing

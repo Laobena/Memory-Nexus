@@ -105,6 +105,7 @@ pub struct QueryAnalysis {
     pub scoring_weights: ScoringWeights,
     pub embedding: Option<crate::core::types::ConstVector<1024>>,
     pub analysis_time_us: u64,
+    pub parent_uuid: Option<uuid::Uuid>,  // For graph traversal
 }
 
 #[derive(Debug, Clone)]
@@ -364,6 +365,7 @@ impl IntelligentRouter {
             scoring_weights,
             embedding,
             analysis_time_us,
+            parent_uuid: None,  // Can be set later for related queries
         }
     }
 
@@ -394,6 +396,7 @@ impl IntelligentRouter {
             scoring_weights,
             embedding: None,
             analysis_time_us: 5, // Fast path typically <5μs
+            parent_uuid: None,
         }
     }
     

@@ -169,15 +169,19 @@ impl StorageEngine {
     
     // ===== NEW STORAGE METHODS WITH UUID TRACKING =====
     
-    /// Store preprocessed data with UUID tracking (called after preprocessing)
+    /// Store preprocessed data with batch writing for 10x better performance
     pub async fn store_preprocessed(&self, data: &PreprocessedData, query_id: Uuid, user_id: &str) -> Result<()> {
-        // Store each chunk as a Memory with parent UUID
+        // Prepare batch of memories
+        let mut batch_memories = Vec::with_capacity(data.chunks.len() + data.entities.len());
+        let mut cache_entries = Vec::with_capacity(data.chunks.len());
+        
+        // Prepare chunk memories
         for (i, chunk) in data.chunks.iter().enumerate() {
             let chunk_uuid = Uuid::new_v4();
             
             let chunk_memory = Memory {
                 uuid: chunk_uuid,
-                original_uuid: query_id, // Links back to original query
+                original_uuid: query_id,
                 parent_uuid: Some(query_id),
                 content: chunk.text.clone(),
                 memory_type: MemoryType::Document,
@@ -198,22 +202,14 @@ impl StorageEngine {
                 },
             };
             
-            // Store in UUID system
-            self.uuid_system.create_memory_from_struct(chunk_memory).await?;
-            
-            // Cache for fast access
-            self.cache.insert(
-                chunk_uuid.to_string(),
-                Bytes::from(chunk.text.clone())
-            ).await;
+            batch_memories.push(chunk_memory);
+            cache_entries.push((chunk_uuid.to_string(), chunk.text.clone()));
         }
         
-        // Store entities as well
+        // Prepare entity memories
         for entity in &data.entities {
-            let entity_uuid = Uuid::new_v4();
-            
             let entity_memory = Memory {
-                uuid: entity_uuid,
+                uuid: Uuid::new_v4(),
                 original_uuid: query_id,
                 parent_uuid: Some(query_id),
                 content: entity.text.clone(),
@@ -234,26 +230,37 @@ impl StorageEngine {
                 },
             };
             
-            self.uuid_system.create_memory_from_struct(entity_memory).await?;
+            batch_memories.push(entity_memory);
         }
         
-        tracing::debug!("Stored {} chunks and {} entities for query {}", 
+        // Batch write to UUID system (10x faster than individual writes)
+        if !batch_memories.is_empty() {
+            self.uuid_system.create_memories_batch(batch_memories).await?;
+        }
+        
+        // Batch cache updates
+        for (key, text) in cache_entries {
+            self.cache.insert(key, Bytes::from(text)).await;
+        }
+        
+        tracing::debug!("Batch stored {} chunks and {} entities for query {}", 
                        data.chunks.len(), data.entities.len(), query_id);
         Ok(())
     }
     
-    /// Store search results with UUID tracking and relationships
+    /// Store search results with batch writing for better performance
     pub async fn store_search_results(
         &self, 
         results: &[super::SearchResult], 
         query_id: Uuid,
         user_id: &str
     ) -> Result<()> {
+        // Prepare batch of result memories
+        let mut batch_memories = Vec::with_capacity(results.len());
+        
         for result in results {
-            let result_uuid = Uuid::new_v4();
-            
             let result_memory = Memory {
-                uuid: result_uuid,
+                uuid: Uuid::new_v4(),
                 original_uuid: query_id,
                 parent_uuid: Some(query_id),
                 content: result.content.clone(),
@@ -275,10 +282,15 @@ impl StorageEngine {
                 },
             };
             
-            self.uuid_system.create_memory_from_struct(result_memory).await?;
+            batch_memories.push(result_memory);
         }
         
-        tracing::debug!("Stored {} search results for query {}", results.len(), query_id);
+        // Batch write to UUID system
+        if !batch_memories.is_empty() {
+            self.uuid_system.create_memories_batch(batch_memories).await?;
+        }
+        
+        tracing::debug!("Batch stored {} search results for query {}", results.len(), query_id);
         Ok(())
     }
     

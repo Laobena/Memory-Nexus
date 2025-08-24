@@ -8,6 +8,7 @@
 
 use crate::core::types::ConstVector;
 use crate::core::{EnhancedUUIDSystem, uuid_types::{Memory, MemoryType}};
+use crate::core::hash_utils::generate_pipeline_cache_key;
 use crate::database::{UnifiedDatabasePool, setup_qdrant_collections};
 use crate::monitoring::MetricsCollector;
 use crate::optimizations::memory_pool::{PoolHandle, global_pool};
@@ -206,14 +207,57 @@ impl UnifiedPipeline {
         }
         
         // Step 1: Analyze query complexity (<0.2ms)
+        if let Some(ref uuid_system) = self.uuid_system {
+            let _ = uuid_system.log_processing_stage(
+                query_id,
+                "router.analysis",
+                "started",
+                None
+            ).await;
+        }
+        
         let analysis = self.router.analyze(&query, query_id).await;
         self.metrics.record_routing_decision(&analysis.routing_path);
+        
+        if let Some(ref uuid_system) = self.uuid_system {
+            let _ = uuid_system.log_processing_stage(
+                query_id,
+                "router.analysis",
+                "completed",
+                Some(json!({
+                    "routing_path": format!("{:?}", analysis.routing_path),
+                    "confidence": analysis.confidence,
+                    "complexity": format!("{:?}", analysis.complexity)
+                }))
+            ).await;
+        }
         
         info!("Query {} routed to {:?} path (complexity: {:?}, cache_prob: {:.2})", 
             query_id, analysis.routing_path, analysis.complexity, analysis.cache_probability);
         
         // Step 2: Execute appropriate path with escalation support
+        if let Some(ref uuid_system) = self.uuid_system {
+            let _ = uuid_system.log_processing_stage(
+                query_id,
+                &format!("path.{:?}", analysis.routing_path),
+                "started",
+                None
+            ).await;
+        }
+        
         let mut result = self.execute_path(&analysis, query_id, &user_id).await?;
+        
+        if let Some(ref uuid_system) = self.uuid_system {
+            let _ = uuid_system.log_processing_stage(
+                query_id,
+                &format!("path.{:?}", analysis.routing_path),
+                "completed",
+                Some(json!({
+                    "result_count": result.results.len(),
+                    "confidence": result.confidence
+                }))
+            ).await;
+        }
         let mut escalation_count = 0;
         let mut current_path = analysis.routing_path.clone();
         
@@ -287,18 +331,35 @@ impl UnifiedPipeline {
         let start = Instant::now();
         debug!("Query {} using cache-only path", query_id);
         
-        // Generate minimal embedding using memory pool
-        let embedding = self.generate_minimal_embedding(&analysis.query).await?;
+        // SKIP PREPROCESSING ENTIRELY for cache-only!
+        // Just do a direct cache lookup using query hash
+        let cache_key = generate_pipeline_cache_key(Some(user_id), &analysis.query.text);
         
-        // Search cache only
-        let results = tokio::time::timeout(
-            std::time::Duration::from_millis(self.config.cache_timeout_ms),
-            self.search.search_cache_only(&embedding)
-        ).await
-            .context("Cache search timeout")?
-            .context("Cache search failed")?;
+        // Try direct cache hit first (fastest path)
+        if let Some(cached_result) = self.search.get_cached_result(&cache_key).await {
+            debug!("Direct cache hit for query {} in {:?}", query_id, start.elapsed());
+            return Ok(ProcessingResult {
+                results: vec![cached_result],
+                confidence: 0.95, // High confidence for exact cache hits
+            });
+        }
         
-        let confidence = self.calculate_result_confidence(&results);
+        // If no direct hit, do minimal similarity search in cache
+        // Use pre-computed embedding from router if available
+        let results = if let Some(embedding) = &analysis.embedding {
+            // Router already generated embedding, use it
+            tokio::time::timeout(
+                std::time::Duration::from_millis(self.config.cache_timeout_ms),
+                self.search.search_cache_only_with_embedding(embedding)
+            ).await
+                .context("Cache search timeout")?
+                .context("Cache search failed")?
+        } else {
+            // No embedding available, return empty (true cache-only)
+            vec![]
+        };
+        
+        let confidence = if results.is_empty() { 0.0 } else { self.calculate_result_confidence(&results) };
         
         debug!("Cache-only completed in {:?} with {} results", start.elapsed(), results.len());
         

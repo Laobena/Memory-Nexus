@@ -199,6 +199,156 @@ impl EnhancedUUIDSystem {
         ).await
     }
     
+    /// Log processing stage for pipeline tracking
+    pub async fn log_processing_stage(
+        &self,
+        uuid: Uuid,
+        stage: &str,
+        status: &str,
+        metadata: Option<serde_json::Value>,
+    ) -> Result<()> {
+        let query = r#"
+            CREATE processing_log SET
+                uuid = $uuid,
+                stage = $stage,
+                status = $status,
+                timestamp = time::now(),
+                metadata = $metadata
+        "#;
+        
+        self.surrealdb
+            .query(query)
+            .bind(("uuid", uuid.to_string()))
+            .bind(("stage", stage))
+            .bind(("status", status))
+            .bind(("metadata", metadata.unwrap_or_else(|| json!({}))))
+            .await?;
+        
+        debug!("Logged processing stage: {} - {} ({})", uuid, stage, status);
+        Ok(())
+    }
+    
+    /// Batch log multiple processing stages
+    pub async fn log_processing_batch(
+        &self,
+        logs: Vec<(Uuid, String, String, Option<serde_json::Value>)>,
+    ) -> Result<()> {
+        if logs.is_empty() {
+            return Ok(());
+        }
+        
+        let mut query = String::from("BEGIN TRANSACTION;\n");
+        
+        for (uuid, stage, status, metadata) in &logs {
+            query.push_str(&format!(
+                "CREATE processing_log SET uuid = '{}', stage = '{}', status = '{}', timestamp = time::now(), metadata = $metadata_{};\n",
+                uuid, stage, status, uuid.as_simple()
+            ));
+        }
+        
+        query.push_str("COMMIT TRANSACTION;");
+        
+        // Bind metadata parameters
+        let mut db_query = self.surrealdb.query(query);
+        for (uuid, _, _, metadata) in &logs {
+            let param = format!("metadata_{}", uuid.as_simple());
+            db_query = db_query.bind((param, metadata.clone().unwrap_or_else(|| json!({}))));
+        }
+        
+        db_query.await?;
+        
+        debug!("Batch logged {} processing stages", logs.len());
+        Ok(())
+    }
+    
+    /// Get processing log for a UUID
+    pub async fn get_processing_log(&self, uuid: Uuid) -> Result<Vec<serde_json::Value>> {
+        let logs: Vec<serde_json::Value> = self.surrealdb
+            .query("SELECT * FROM processing_log WHERE uuid = $uuid ORDER BY timestamp")
+            .bind(("uuid", uuid.to_string()))
+            .await?
+            .take(0)?;
+        
+        Ok(logs)
+    }
+    
+    /// Batch create multiple memories for better performance
+    pub async fn create_memories_batch(&self, memories: Vec<Memory>) -> Result<Vec<Uuid>> {
+        if memories.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        let start = std::time::Instant::now();
+        let batch_size = memories.len();
+        
+        // Prepare batch insert query
+        let mut query = String::from("BEGIN TRANSACTION;\n");
+        let mut uuids = Vec::with_capacity(batch_size);
+        
+        for memory in &memories {
+            let uuid = memory.uuid;
+            uuids.push(uuid);
+            
+            // Build individual INSERT statement
+            query.push_str(&format!(
+                "CREATE memory:{} SET 
+                    uuid = '{}',
+                    original_uuid = '{}',
+                    parent_uuid = {},
+                    content = $content_{},
+                    memory_type = '{}',
+                    user_id = '{}',
+                    session_id = '{}',
+                    created_at = time::now(),
+                    last_accessed = time::now(),
+                    access_count = 0,
+                    confidence_score = {},
+                    processing_path = '{}',
+                    processing_time_ms = {},
+                    metadata = $metadata_{},
+                    content_hash = crypto::sha256($content_{});\n",
+                uuid,
+                uuid,
+                memory.original_uuid,
+                memory.parent_uuid.map_or("NULL".to_string(), |p| format!("'{}'", p)),
+                uuid.as_simple(),
+                memory.memory_type.as_str(),
+                memory.user_id,
+                memory.session_id,
+                memory.confidence_score,
+                memory.processing_path,
+                memory.processing_time_ms,
+                uuid.as_simple(),
+                uuid.as_simple(),
+            ));
+        }
+        
+        query.push_str("COMMIT TRANSACTION;");
+        
+        // Bind all content and metadata parameters
+        let mut db_query = self.surrealdb.query(query);
+        for memory in &memories {
+            let param_content = format!("content_{}", memory.uuid.as_simple());
+            let param_metadata = format!("metadata_{}", memory.uuid.as_simple());
+            db_query = db_query
+                .bind((param_content, &memory.content))
+                .bind((param_metadata, &memory.metadata));
+        }
+        
+        // Execute batch insert
+        db_query.await?;
+        
+        let elapsed = start.elapsed();
+        info!("✅ Batch created {} memories in {:?} ({:.2} memories/sec)", 
+              batch_size, elapsed, 
+              batch_size as f64 / elapsed.as_secs_f64());
+        
+        // Update metrics
+        self.metrics.total_memories.fetch_add(batch_size, std::sync::atomic::Ordering::Relaxed);
+        
+        Ok(uuids)
+    }
+    
     /// Create a new memory linked to original truth
     #[instrument(skip(self, content))]
     pub async fn create_memory(
