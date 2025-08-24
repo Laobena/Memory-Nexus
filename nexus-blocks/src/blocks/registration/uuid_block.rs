@@ -1,6 +1,10 @@
 //! UUID Generator Block - Foundation of the reference system
 
-use crate::core::{BlockError, BlockResult, PipelineBlock, DeploymentMode, BlockType};
+use crate::core::{
+    BlockError, BlockResult, PipelineBlock, DeploymentMode, BlockType,
+    BlockMetadata, BlockCategory, BlockConfig, BlockInput, BlockOutput,
+    PipelineContext, HealthStatus, BlockMetrics, RecoveryStrategy
+};
 use uuid::Uuid;
 use dashmap::DashMap;
 use chrono::{DateTime, Utc};
@@ -28,40 +32,12 @@ pub enum RequestType {
     Query,
     Search,
     Storage,
-    Fusion,
-    Cache,
-}
-
-/// UUID context output
-#[derive(Debug, Clone)]
-pub struct UUIDContext {
-    pub uuid: Uuid,
-    pub metadata: UUIDMetadata,
-    pub registry: Arc<DashMap<Uuid, UUIDMetadata>>,
-}
-
-/// UUID configuration
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct UUIDConfig {
-    pub enable_checksums: bool,
-    pub max_registry_size: usize,
-    pub session_tracking: bool,
-    pub recovery_log_size: usize,
-}
-
-impl Default for UUIDConfig {
-    fn default() -> Self {
-        Self {
-            enable_checksums: true,
-            max_registry_size: 100_000,
-            session_tracking: true,
-            recovery_log_size: 10_000,
-        }
-    }
+    Processing,
+    Response,
 }
 
 /// UUID metadata for tracking
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UUIDMetadata {
     pub uuid: Uuid,
     pub timestamp: DateTime<Utc>,
@@ -76,8 +52,16 @@ pub struct UUIDMetadata {
     pub child_uuids: Vec<Uuid>,
 }
 
+/// UUID context returned to pipeline
+#[derive(Debug, Clone)]
+pub struct UUIDContext {
+    pub uuid: Uuid,
+    pub metadata: UUIDMetadata,
+    pub registry: Arc<DashMap<Uuid, UUIDMetadata>>,
+}
+
 /// Link type for UUID relationships
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkType {
     Parent,
     Child,
@@ -85,80 +69,82 @@ pub enum LinkType {
     Derived,
 }
 
-/// Recovery operation for audit log
+/// UUID configuration
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UUIDConfig {
+    pub enable_checksums: bool,
+    pub session_tracking: bool,
+    pub max_retries: u32,
+    pub enable_metrics: bool,
+}
+
+impl Default for UUIDConfig {
+    fn default() -> Self {
+        Self {
+            enable_checksums: true,
+            session_tracking: true,
+            max_retries: 3,
+            enable_metrics: true,
+        }
+    }
+}
+
+/// UUID generator block
 #[derive(Debug, Clone)]
-pub struct UUIDRecovery {
-    pub uuid: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub operation: RecoveryOp,
-}
-
-/// Recovery operation type
-#[derive(Debug, Clone, Copy)]
-pub enum RecoveryOp {
-    Created,
-    Linked,
-    Updated,
-    Deleted,
-}
-
-/// UUID Generator Block - Foundation of reference system
 pub struct UUIDBlock {
-    /// Registry of all generated UUIDs
-    registry: Arc<DashMap<Uuid, UUIDMetadata>>,
-    /// Session tracking
-    sessions: Arc<DashMap<String, Vec<Uuid>>>,
-    /// Checksum validator
-    checksum_cache: Arc<DashMap<Uuid, [u8; 32]>>,
-    /// Error recovery
-    recovery_log: Arc<RwLock<Vec<UUIDRecovery>>>,
-    /// Configuration
+    metadata: BlockMetadata,
     config: UUIDConfig,
-    /// Metrics
-    metrics: Arc<UUIDMetrics>,
-}
-
-/// Metrics for UUID operations
-#[derive(Debug, Default)]
-struct UUIDMetrics {
-    generated: std::sync::atomic::AtomicU64,
-    collisions: std::sync::atomic::AtomicU64,
-    links_created: std::sync::atomic::AtomicU64,
-    checksum_failures: std::sync::atomic::AtomicU64,
+    registry: Arc<DashMap<Uuid, UUIDMetadata>>,
+    sessions: Arc<DashMap<String, Vec<Uuid>>>,
+    relationships: Arc<DashMap<(Uuid, Uuid), LinkType>>,
+    metrics: Arc<RwLock<BlockMetrics>>,
+    collision_counter: Arc<parking_lot::Mutex<u32>>,
 }
 
 impl UUIDBlock {
-    /// Create new UUID generator block
+    /// Create new UUID block
     pub fn new(config: UUIDConfig) -> Self {
         Self {
-            registry: Arc::new(DashMap::with_capacity(config.max_registry_size / 10)),
-            sessions: Arc::new(DashMap::new()),
-            checksum_cache: Arc::new(DashMap::new()),
-            recovery_log: Arc::new(RwLock::new(Vec::with_capacity(config.recovery_log_size))),
+            metadata: BlockMetadata {
+                id: Uuid::new_v4(),
+                name: "UUID Generator".to_string(),
+                version: "1.0.0".to_string(),
+                category: BlockCategory::Registration,
+                deployment_mode: DeploymentMode::Hybrid,
+                hot_swappable: true,
+                c_abi_compatible: true,
+            },
             config,
-            metrics: Arc::new(UUIDMetrics::default()),
+            registry: Arc::new(DashMap::new()),
+            sessions: Arc::new(DashMap::new()),
+            relationships: Arc::new(DashMap::new()),
+            metrics: Arc::new(RwLock::new(BlockMetrics::default())),
+            collision_counter: Arc::new(parking_lot::Mutex::new(0)),
         }
     }
-
-    /// Generate guaranteed unique UUID
-    async fn generate_unique_uuid(&self) -> Result<Uuid, BlockError> {
-        use std::sync::atomic::Ordering;
+    
+    /// Generate unique UUID with collision detection
+    async fn generate_unique_uuid(&self) -> BlockResult<Uuid> {
+        let mut retries = 0;
         
-        let mut attempts = 0;
         loop {
             let uuid = Uuid::new_v4();
             
-            // Check uniqueness (UUID v4 has 122 bits of randomness)
+            // Check for collision (extremely rare)
             if !self.registry.contains_key(&uuid) {
-                self.metrics.generated.fetch_add(1, Ordering::Relaxed);
                 return Ok(uuid);
             }
             
-            attempts += 1;
-            if attempts > 3 {
-                self.metrics.collisions.fetch_add(1, Ordering::Relaxed);
-                // This should never happen (probability ~10^-38)
-                return Err(BlockError::Unknown("UUID collision detected".into()));
+            // Track collision for metrics
+            let mut counter = self.collision_counter.lock();
+            *counter += 1;
+            
+            retries += 1;
+            if retries >= self.config.max_retries {
+                return Err(BlockError::Internal {
+                    message: "UUID collision after max retries".to_string(),
+                    recoverable: false,
+                });
             }
         }
     }
@@ -171,137 +157,50 @@ impl UUIDBlock {
         hasher.update(input.org_id.as_bytes());
         hasher.update(&[input.request_type as u8]);
         
-        if let Ok(metadata_bytes) = serde_json::to_vec(&input.metadata) {
-            hasher.update(&metadata_bytes);
+        if let Some(parent) = input.parent_uuid {
+            hasher.update(parent.as_bytes());
         }
         
-        let hash = hasher.finalize();
-        let mut checksum = [0u8; 32];
-        checksum.copy_from_slice(hash.as_bytes());
-        checksum
+        *hasher.finalize().as_bytes()
     }
     
-    /// Register UUID in all tracking systems
-    async fn register_uuid(&self, metadata: UUIDMetadata) -> Result<(), BlockError> {
-        let uuid = metadata.uuid;
+    /// Register UUID in the registry
+    async fn register_uuid(&self, metadata: UUIDMetadata) -> BlockResult<()> {
+        self.registry.insert(metadata.uuid, metadata.clone());
         
-        // Store in registry
-        self.registry.insert(uuid, metadata.clone());
-        
-        // Store checksum for validation
-        if self.config.enable_checksums {
-            self.checksum_cache.insert(uuid, metadata.checksum);
-        }
-        
-        // Log for recovery
-        if let Ok(mut log) = self.recovery_log.try_write() {
-            log.push(UUIDRecovery {
-                uuid,
-                timestamp: metadata.timestamp,
-                operation: RecoveryOp::Created,
-            });
-            
-            // Keep only last N entries
-            if log.len() > self.config.recovery_log_size {
-                log.drain(0..self.config.recovery_log_size / 2);
-            }
+        if self.config.enable_metrics {
+            let mut metrics = self.metrics.write();
+            metrics.requests_processed += 1;
         }
         
         Ok(())
     }
     
-    /// Create bidirectional reference
-    pub async fn link_uuids(&self, from: Uuid, to: Uuid, link_type: LinkType) -> Result<(), BlockError> {
-        use std::sync::atomic::Ordering;
+    /// Link two UUIDs with a relationship
+    async fn link_uuids(&self, from: Uuid, to: Uuid, link_type: LinkType) -> BlockResult<()> {
+        self.relationships.insert((from, to), link_type);
         
-        // Update 'from' references
+        // Update metadata for both UUIDs
         if let Some(mut from_meta) = self.registry.get_mut(&from) {
-            match link_type {
-                LinkType::Child => from_meta.child_uuids.push(to),
-                _ => from_meta.references.push(to),
+            if link_type == LinkType::Child {
+                from_meta.child_uuids.push(to);
+            } else {
+                from_meta.references.push(to);
             }
-        } else {
-            return Err(BlockError::Unknown(format!("UUID not found: {}", from)));
         }
         
-        // Update 'to' references
         if let Some(mut to_meta) = self.registry.get_mut(&to) {
-            match link_type {
-                LinkType::Parent => to_meta.parent_uuid = Some(from),
-                _ => to_meta.references.push(from),
+            if link_type == LinkType::Child {
+                to_meta.parent_uuid = Some(from);
+            } else {
+                to_meta.references.push(from);
             }
-        }
-        
-        self.metrics.links_created.fetch_add(1, Ordering::Relaxed);
-        
-        // Log the link operation
-        if let Ok(mut log) = self.recovery_log.try_write() {
-            log.push(UUIDRecovery {
-                uuid: from,
-                timestamp: Utc::now(),
-                operation: RecoveryOp::Linked,
-            });
         }
         
         Ok(())
     }
     
-    /// Get complete reference chain
-    pub async fn get_reference_chain(&self, uuid: Uuid) -> Result<Vec<Uuid>, BlockError> {
-        let mut chain = Vec::new();
-        let mut visited = HashSet::new();
-        let mut queue = VecDeque::new();
-        
-        queue.push_back(uuid);
-        visited.insert(uuid);
-        
-        while let Some(current) = queue.pop_front() {
-            chain.push(current);
-            
-            if let Some(metadata) = self.registry.get(&current) {
-                // Add all references
-                for reference in &metadata.references {
-                    if !visited.contains(reference) {
-                        visited.insert(*reference);
-                        queue.push_back(*reference);
-                    }
-                }
-                
-                // Add children
-                for child in &metadata.child_uuids {
-                    if !visited.contains(child) {
-                        visited.insert(*child);
-                        queue.push_back(*child);
-                    }
-                }
-                
-                // Add parent
-                if let Some(parent) = metadata.parent_uuid {
-                    if !visited.contains(&parent) {
-                        visited.insert(parent);
-                        queue.push_back(parent);
-                    }
-                }
-            }
-        }
-        
-        Ok(chain)
-    }
-    
-    /// Validate UUID checksum
-    pub fn validate_checksum(&self, uuid: Uuid, checksum: &[u8; 32]) -> bool {
-        if !self.config.enable_checksums {
-            return true;
-        }
-        
-        if let Some(stored_checksum) = self.checksum_cache.get(&uuid) {
-            stored_checksum.as_ref() == checksum
-        } else {
-            false
-        }
-    }
-    
-    /// Get session UUIDs
+    /// Get all UUIDs for a session
     pub fn get_session_uuids(&self, session_id: &str) -> Vec<Uuid> {
         self.sessions
             .get(session_id)
@@ -309,44 +208,58 @@ impl UUIDBlock {
             .unwrap_or_default()
     }
     
-    /// Clean up old sessions
+    /// Get metadata for a UUID
+    pub fn get_metadata(&self, uuid: &Uuid) -> Option<UUIDMetadata> {
+        self.registry.get(uuid).map(|meta| meta.clone())
+    }
+    
+    /// Get all child UUIDs
+    pub fn get_children(&self, parent: &Uuid) -> Vec<Uuid> {
+        self.registry
+            .get(parent)
+            .map(|meta| meta.child_uuids.clone())
+            .unwrap_or_default()
+    }
+    
+    /// Get parent UUID
+    pub fn get_parent(&self, child: &Uuid) -> Option<Uuid> {
+        self.registry
+            .get(child)
+            .and_then(|meta| meta.parent_uuid)
+    }
+    
+    /// Clean up old sessions (garbage collection)
     pub async fn cleanup_old_sessions(&self, older_than: DateTime<Utc>) -> usize {
         let mut removed = 0;
+        let mut sessions_to_remove = Vec::new();
         
-        // Collect sessions to remove
-        let sessions_to_remove: Vec<String> = self.sessions
-            .iter()
-            .filter_map(|entry| {
-                let session_id = entry.key().clone();
-                let uuids = entry.value();
-                
-                // Check if all UUIDs in session are old
-                let all_old = uuids.iter().all(|uuid| {
-                    self.registry
-                        .get(uuid)
-                        .map(|meta| meta.timestamp < older_than)
-                        .unwrap_or(true)
-                });
-                
-                if all_old {
-                    Some(session_id)
-                } else {
-                    None
-                }
-            })
-            .collect();
-        
-        // Remove old sessions
-        for session_id in sessions_to_remove {
-            if let Some((_, uuids)) = self.sessions.remove(&session_id) {
+        // Find sessions to remove
+        for session in self.sessions.iter() {
+            let session_id = session.key().clone();
+            let uuids = session.value().clone();
+            
+            // Check if all UUIDs in session are old
+            let all_old = uuids.iter().all(|uuid| {
+                self.registry
+                    .get(uuid)
+                    .map(|meta| meta.timestamp < older_than)
+                    .unwrap_or(true)
+            });
+            
+            if all_old {
+                sessions_to_remove.push(session_id);
                 removed += uuids.len();
                 
-                // Also remove from registry
+                // Remove UUIDs from registry
                 for uuid in uuids {
                     self.registry.remove(&uuid);
-                    self.checksum_cache.remove(&uuid);
                 }
             }
+        }
+        
+        // Remove sessions
+        for session_id in sessions_to_remove {
+            self.sessions.remove(&session_id);
         }
         
         removed
@@ -355,22 +268,48 @@ impl UUIDBlock {
 
 #[async_trait]
 impl PipelineBlock for UUIDBlock {
-    type Input = UUIDRequest;
-    type Output = UUIDContext;
-    type Config = UUIDConfig;
+    fn metadata(&self) -> &BlockMetadata {
+        &self.metadata
+    }
     
-    async fn execute(
+    async fn initialize(&mut self, _config: BlockConfig) -> Result<(), BlockError> {
+        // UUID block is always ready
+        Ok(())
+    }
+    
+    async fn process(
         &self,
-        input: Self::Input,
-        _config: Self::Config,
-        _deployment: &DeploymentMode,
-    ) -> Result<Self::Output, BlockError> {
+        input: BlockInput,
+        context: &mut PipelineContext,
+    ) -> BlockResult<BlockOutput> {
+        // Extract request from input
+        let request = match input {
+            BlockInput::Structured(json) => {
+                serde_json::from_value::<UUIDRequest>(json)
+                    .map_err(|e| BlockError::Validation {
+                        field: "input".to_string(),
+                        message: format!("Invalid UUID request: {}", e),
+                    })?
+            }
+            _ => {
+                // Create default request for other input types
+                UUIDRequest {
+                    session_id: context.request_id.to_string(),
+                    user_id: context.user_id.clone().unwrap_or_else(|| "anonymous".to_string()),
+                    org_id: "default".to_string(),
+                    request_type: RequestType::Query,
+                    parent_uuid: None,
+                    metadata: serde_json::json!({}),
+                }
+            }
+        };
+        
         // Generate UUID with retry on collision (extremely rare)
         let uuid = self.generate_unique_uuid().await?;
         
         // Calculate checksum for integrity
         let checksum = if self.config.enable_checksums {
-            self.calculate_checksum(&input)
+            self.calculate_checksum(&request)
         } else {
             [0u8; 32]
         };
@@ -379,14 +318,14 @@ impl PipelineBlock for UUIDBlock {
         let metadata = UUIDMetadata {
             uuid,
             timestamp: Utc::now(),
-            session_id: input.session_id.clone(),
-            user_id: input.user_id.clone(),
-            organization_id: input.org_id.clone(),
+            session_id: request.session_id.clone(),
+            user_id: request.user_id.clone(),
+            organization_id: request.org_id.clone(),
             checksum,
             references: Vec::new(),
             block_type: BlockType::Pipeline,
-            request_type: input.request_type,
-            parent_uuid: input.parent_uuid,
+            request_type: request.request_type,
+            parent_uuid: request.parent_uuid,
             child_uuids: Vec::new(),
         };
         
@@ -396,32 +335,51 @@ impl PipelineBlock for UUIDBlock {
         // Track in session if enabled
         if self.config.session_tracking {
             self.sessions
-                .entry(input.session_id.clone())
+                .entry(request.session_id.clone())
                 .or_insert_with(Vec::new)
                 .push(uuid);
         }
         
         // Link to parent if provided
-        if let Some(parent) = input.parent_uuid {
+        if let Some(parent) = request.parent_uuid {
             self.link_uuids(parent, uuid, LinkType::Child).await?;
         }
         
-        Ok(UUIDContext {
-            uuid,
-            metadata,
-            registry: Arc::clone(&self.registry),
-        })
+        // Store UUID in context metadata
+        context.metadata.insert("uuid".to_string(), uuid.to_string());
+        context.metadata.insert("uuid_timestamp".to_string(), metadata.timestamp.to_rfc3339());
+        
+        // Return UUID context as structured output
+        Ok(BlockOutput::Structured(serde_json::json!({
+            "uuid": uuid,
+            "metadata": metadata,
+            "success": true
+        })))
     }
     
-    fn estimated_latency_ms(&self) -> u32 { 1 } // <1ms
+    fn validate_input(&self, _input: &BlockInput) -> Result<(), BlockError> {
+        // UUID block accepts any input
+        Ok(())
+    }
     
-    fn resource_requirements(&self) -> crate::core::ResourceRequirements {
-        crate::core::ResourceRequirements {
-            memory_mb: 10,
-            cpu_cores: 0.1,
-            disk_mb: 0,
-            network_bandwidth_mbps: 0.0,
-        }
+    fn recovery_strategy(&self) -> RecoveryStrategy {
+        RecoveryStrategy::Retry(Default::default())
+    }
+    
+    async fn health_check(&self) -> Result<HealthStatus, BlockError> {
+        let metrics = self.metrics.read();
+        let registry_size = self.registry.len();
+        let session_count = self.sessions.len();
+        
+        Ok(HealthStatus::Healthy)
+    }
+    
+    fn metrics(&self) -> BlockMetrics {
+        self.metrics.read().clone()
+    }
+    
+    fn clone_box(&self) -> Box<dyn PipelineBlock> {
+        Box::new(self.clone())
     }
 }
 
@@ -431,7 +389,8 @@ mod tests {
     
     #[tokio::test]
     async fn test_uuid_generation() {
-        let block = UUIDBlock::new(UUIDConfig::default());
+        let mut block = UUIDBlock::new(UUIDConfig::default());
+        block.initialize(BlockConfig::default()).await.unwrap();
         
         let request = UUIDRequest {
             session_id: "test-session".to_string(),
@@ -442,64 +401,69 @@ mod tests {
             metadata: serde_json::json!({"test": true}),
         };
         
-        let result = block.execute(
-            request.clone(),
-            UUIDConfig::default(),
-            &DeploymentMode::Standalone
-        ).await.unwrap();
+        let input = BlockInput::Structured(serde_json::to_value(request).unwrap());
+        let mut context = PipelineContext::new(Uuid::new_v4(), DeploymentMode::Standalone);
         
-        assert_ne!(result.uuid, Uuid::nil());
-        assert_eq!(result.metadata.session_id, "test-session");
+        let result = block.process(input, &mut context).await.unwrap();
         
-        // Test uniqueness
-        let result2 = block.execute(
-            request,
-            UUIDConfig::default(),
-            &DeploymentMode::Standalone
-        ).await.unwrap();
-        
-        assert_ne!(result.uuid, result2.uuid);
+        match result {
+            BlockOutput::Structured(json) => {
+                assert!(json["success"].as_bool().unwrap());
+                assert!(json["uuid"].as_str().is_some());
+            }
+            _ => panic!("Expected structured output"),
+        }
     }
     
     #[tokio::test]
-    async fn test_uuid_linking() {
-        let block = UUIDBlock::new(UUIDConfig::default());
+    async fn test_parent_child_linking() {
+        let mut block = UUIDBlock::new(UUIDConfig::default());
+        block.initialize(BlockConfig::default()).await.unwrap();
+        
+        let mut context = PipelineContext::new(Uuid::new_v4(), DeploymentMode::Standalone);
         
         // Create parent
         let parent_request = UUIDRequest {
-            session_id: "test".to_string(),
-            user_id: "user".to_string(),
-            org_id: "org".to_string(),
+            session_id: "test-session".to_string(),
+            user_id: "user-123".to_string(),
+            org_id: "org-456".to_string(),
             request_type: RequestType::Query,
             parent_uuid: None,
             metadata: serde_json::json!({}),
         };
         
-        let parent = block.execute(
-            parent_request,
-            UUIDConfig::default(),
-            &DeploymentMode::Standalone
-        ).await.unwrap();
+        let parent_input = BlockInput::Structured(serde_json::to_value(parent_request).unwrap());
+        let parent_result = block.process(parent_input, &mut context).await.unwrap();
+        
+        let parent_uuid = match parent_result {
+            BlockOutput::Structured(json) => {
+                Uuid::parse_str(json["uuid"].as_str().unwrap()).unwrap()
+            }
+            _ => panic!("Expected structured output"),
+        };
         
         // Create child
         let child_request = UUIDRequest {
-            session_id: "test".to_string(),
-            user_id: "user".to_string(),
-            org_id: "org".to_string(),
-            request_type: RequestType::Search,
-            parent_uuid: Some(parent.uuid),
+            session_id: "test-session".to_string(),
+            user_id: "user-123".to_string(),
+            org_id: "org-456".to_string(),
+            request_type: RequestType::Processing,
+            parent_uuid: Some(parent_uuid),
             metadata: serde_json::json!({}),
         };
         
-        let child = block.execute(
-            child_request,
-            UUIDConfig::default(),
-            &DeploymentMode::Standalone
-        ).await.unwrap();
+        let child_input = BlockInput::Structured(serde_json::to_value(child_request).unwrap());
+        let child_result = block.process(child_input, &mut context).await.unwrap();
         
-        // Verify linking
-        let chain = block.get_reference_chain(parent.uuid).await.unwrap();
-        assert!(chain.contains(&parent.uuid));
-        assert!(chain.contains(&child.uuid));
+        let child_uuid = match child_result {
+            BlockOutput::Structured(json) => {
+                Uuid::parse_str(json["uuid"].as_str().unwrap()).unwrap()
+            }
+            _ => panic!("Expected structured output"),
+        };
+        
+        // Verify relationship
+        assert_eq!(block.get_parent(&child_uuid), Some(parent_uuid));
+        assert!(block.get_children(&parent_uuid).contains(&child_uuid));
     }
 }

@@ -1,5 +1,5 @@
 use crate::core::{Result, NexusError};
-use crate::config::MonitoringConfig;
+use crate::core::config::MonitoringConfig;
 use tracing_subscriber::{
     fmt,
     layer::SubscriberExt,

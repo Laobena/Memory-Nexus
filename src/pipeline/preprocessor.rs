@@ -1,7 +1,7 @@
 use crate::core::{Config, Result, NexusError};
-use crate::core::types::{PipelineRequest, DenseVector, SparseVector, Batch};
+use crate::core::types::{PipelineRequest, Batch};
 use crate::core::simd_ops::SimdOps;
-use crate::optimizations::memory_pool::{VectorPool, PoolHandle};
+use crate::optimizations::memory_pool::{VectorPools, PoolHandle};
 use super::router::Route;
 use async_trait::async_trait;
 use rayon::prelude::*;
@@ -15,7 +15,7 @@ pub struct Preprocessor {
     tokenizers: Vec<Box<dyn Tokenizer>>,
     batch_size: usize,
     parallel_enabled: bool,
-    vector_pool: Arc<VectorPool>,
+    vector_pool: Arc<VectorPools>,
     work_queue: Arc<Injector<PreprocessTask>>,
 }
 
@@ -54,7 +54,7 @@ impl Preprocessor {
             ],
             batch_size: 128,
             parallel_enabled: true,
-            vector_pool: Arc::new(VectorPool::new()),
+            vector_pool: Arc::new(VectorPools::new()),
             work_queue: Arc::new(Injector::new()),
         }
     }

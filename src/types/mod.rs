@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 // Re-export from database-adapters for convenience
-pub use database_adapters::MemoryEntry;
+// pub use database_adapters::MemoryEntry; // TODO: Remove old reference
 
 /// Basic query parameters for process endpoint
 #[derive(Debug, Deserialize)]

@@ -489,6 +489,16 @@ impl UnifiedDatabasePool {
         stats
     }
     
+    /// Get SurrealDB connection for UUID system
+    pub async fn get_surrealdb_connection(&self) -> Result<impl std::ops::Deref<Target = SurrealDBConnection>, DatabasePoolError> {
+        self.get_surrealdb().await
+    }
+    
+    /// Get Qdrant connection for UUID system
+    pub async fn get_qdrant_connection(&self) -> Result<impl std::ops::Deref<Target = QdrantConnection>, DatabasePoolError> {
+        self.get_qdrant().await
+    }
+    
     pub async fn test_all_connections(&self) -> Result<(), DatabasePoolError> {
         let mut errors = Vec::new();
         

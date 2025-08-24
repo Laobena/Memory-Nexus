@@ -18,14 +18,14 @@ use tower_http::{
 use std::time::Duration;
 
 use crate::pipeline::Pipeline;
-use crate::database::DatabaseManager;
+use crate::database::UnifiedDatabasePool;
 use crate::core::Config;
 
 /// API state shared across handlers
 #[derive(Clone)]
 pub struct ApiState {
     pub pipeline: Arc<Pipeline>,
-    pub database: Arc<DatabaseManager>,
+    pub database: Arc<UnifiedDatabasePool>,
     pub config: Arc<Config>,
 }
 

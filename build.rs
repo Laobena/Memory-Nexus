@@ -66,19 +66,21 @@ fn detect_cpu_features() {
             println!("cargo:rustc-cfg=has_bmi2");
         }
         
-        // Enable native CPU optimizations if not cross-compiling
-        if !is_cross_compiling() {
-            println!("cargo:rustc-env=RUSTFLAGS=-C target-cpu=native");
-            println!("cargo:warning=🚀 Native CPU optimizations enabled");
-        }
+        // Note: Cannot set RUSTFLAGS from build script
+        // These should be set externally via environment variable
+        // if !is_cross_compiling() {
+        //     println!("cargo:rustc-env=RUSTFLAGS=-C target-cpu=native");
+        //     println!("cargo:warning=🚀 Native CPU optimizations enabled");
+        // }
     } else if target_arch == "aarch64" {
         println!("cargo:rustc-cfg=has_neon");
         println!("cargo:rustc-cfg=has_simd");
         println!("cargo:warning=✅ NEON support detected for ARM64");
         
-        if !is_cross_compiling() {
-            println!("cargo:rustc-env=RUSTFLAGS=-C target-cpu=native");
-        }
+        // Note: Cannot set RUSTFLAGS from build script
+        // if !is_cross_compiling() {
+        //     println!("cargo:rustc-env=RUSTFLAGS=-C target-cpu=native");
+        // }
     } else if target_arch == "wasm32" {
         println!("cargo:rustc-cfg=has_wasm_simd");
         println!("cargo:warning=✅ WebAssembly SIMD support enabled");
@@ -143,12 +145,13 @@ fn set_optimization_flags() {
             println!("cargo:rustc-link-arg=-flto=fat");
             println!("cargo:rustc-link-arg=-fuse-ld=lld");
             
-            // Enable CPU-specific optimizations if not cross-compiling
-            if !is_cross_compiling() {
-                println!("cargo:rustc-flags=-C target-cpu=native");
-                println!("cargo:rustc-flags=-C opt-level=3");
-                println!("cargo:rustc-flags=-C codegen-units=1");
-            }
+            // Note: These flags are commented out as they're not allowed in build scripts
+            // They should be set via RUSTFLAGS environment variable instead
+            // if !is_cross_compiling() {
+            //     println!("cargo:rustc-flags=-C target-cpu=native");
+            //     println!("cargo:rustc-flags=-C opt-level=3");
+            //     println!("cargo:rustc-flags=-C codegen-units=1");
+            // }
             
             // Enable profile-guided optimization if available
             if let Ok(pgo_dir) = env::var("PGO_PROFILE_DIR") {
@@ -167,19 +170,21 @@ fn set_optimization_flags() {
         }
         "dev-fast" => {
             // Fast development builds with minimal optimization
-            println!("cargo:rustc-flags=-C opt-level=1");
-            println!("cargo:rustc-flags=-C codegen-units=256");
-            println!("cargo:rustc-flags=-C debuginfo=0");
+            // Note: rustc-flags not allowed in build scripts - use RUSTFLAGS env var
+            // println!("cargo:rustc-flags=-C opt-level=1");
+            // println!("cargo:rustc-flags=-C codegen-units=256");
+            // println!("cargo:rustc-flags=-C debuginfo=0");
             println!("cargo:warning=⚡ Fast development build enabled");
         }
         "bench" => {
             // Benchmark-specific optimizations
-            println!("cargo:rustc-flags=-C opt-level=3");
-            println!("cargo:rustc-flags=-C lto=fat");
-            println!("cargo:rustc-flags=-C codegen-units=1");
-            if !is_cross_compiling() {
-                println!("cargo:rustc-flags=-C target-cpu=native");
-            }
+            // Note: rustc-flags not allowed in build scripts - use RUSTFLAGS env var
+            // println!("cargo:rustc-flags=-C opt-level=3");
+            // println!("cargo:rustc-flags=-C lto=fat");
+            // println!("cargo:rustc-flags=-C codegen-units=1");
+            // if !is_cross_compiling() {
+            //     println!("cargo:rustc-flags=-C target-cpu=native");
+            // }
             println!("cargo:warning=📊 Benchmark optimizations enabled");
         }
         _ => {

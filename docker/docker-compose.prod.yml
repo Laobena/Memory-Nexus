@@ -12,8 +12,8 @@ services:
   # ================================================================================
   memory-nexus:
     build:
-      context: .
-      dockerfile: Dockerfile.optimized
+      context: ..
+      dockerfile: docker/Dockerfile.prod
       target: distroless  # Use distroless for production
       cache_from:
         - lukemathwalker/cargo-chef:latest-rust-1.81

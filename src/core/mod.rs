@@ -1,11 +1,13 @@
 pub mod aligned_alloc;
 pub mod binary_embeddings;
 pub mod config;
+pub mod enhanced_uuid_system;
 pub mod error;
 pub mod hash_utils;
 pub mod lock_free_cache;
 pub mod simd_ops;
 pub mod types;
+pub mod uuid_types;
 pub mod zero_copy;
 
 // Aligned allocation exports
@@ -50,6 +52,15 @@ pub use zero_copy::{
     ZeroCopySearchResult, SearchSource, ZeroCopyCacheEntry, CacheMetadata,
     ZeroCopyMessage, PipelineStage, MessagePayload, QueryPayload,
     FastSerializer, ZeroCopyAccessor, BatchSerializer,
+};
+
+// Enhanced UUID System exports
+pub use enhanced_uuid_system::EnhancedUUIDSystem;
+pub use uuid_types::{
+    MemoryType, EvolutionType, RelationshipType, OriginalTruth, Memory,
+    MemoryRelationship, MemoryEvolution, ProcessingLog, TemporalSearchResult,
+    UserPatterns, MemoryChain, MemoryStats as UUIDMemoryStats, UUIDConfig, UUIDError,
+    calculate_content_hash, calculate_time_weight, get_time_context,
 };
 
 use once_cell::sync::Lazy;

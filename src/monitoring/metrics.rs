@@ -1,5 +1,5 @@
 use crate::core::{Result, NexusError};
-use crate::config::MonitoringConfig;
+use crate::core::config::MonitoringConfig;
 use dashmap::DashMap;
 use parking_lot::RwLock;
 use std::sync::Arc;

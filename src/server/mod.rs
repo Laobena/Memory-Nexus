@@ -2,7 +2,7 @@
 
 use crate::{
     config::Config,
-    database::DatabaseManager,
+    database::UnifiedDatabasePool,
     health::create_health_router,
     pipeline::PipelineHandler,
     types::{ApiResponse, ProcessQuery},
@@ -21,7 +21,7 @@ use tower_http::{cors::CorsLayer, timeout::TimeoutLayer, trace::TraceLayer};
 /// Application state shared across handlers
 #[derive(Clone)]
 pub struct AppState {
-    pub db: Arc<DatabaseManager>,
+    pub db: Arc<UnifiedDatabasePool>,
     pub pipeline: Arc<PipelineHandler>,
     pub config: Arc<Config>,
 }

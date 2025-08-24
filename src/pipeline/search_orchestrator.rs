@@ -5,10 +5,11 @@
 use crate::core::types::*;
 use crate::core::simd_ops::SimdOps;
 use crate::core::lock_free_cache::{LockFreeCache, CacheConfig, WorkStealingQueue};
+use crate::core::uuid_types::calculate_time_weight;
 use crate::database::enhanced_pool::EnhancedConnectionPool;
 use crate::database::database_connections::UnifiedDatabasePool;
 use crate::pipeline::intelligent_router::{QueryAnalysis, QueryIntent, ScoringWeights};
-use crate::search::bm25_scorer::QuickBM25;
+// use crate::search::bm25_scorer::QuickBM25; // TODO: implement BM25 scorer
 use crossbeam::channel::{bounded, unbounded, Sender, Receiver};
 use dashmap::DashMap;
 use futures::stream::{FuturesUnordered, StreamExt};
@@ -132,7 +133,7 @@ pub struct FiveFactorScorer {
     query_embedding: Option<Vec<f32>>,
     intent: QueryIntent,
     weights: ScoringWeights,
-    bm25_scorer: QuickBM25,  // NEW: Proper BM25+ scorer
+    // bm25_scorer: QuickBM25,  // TODO: Proper BM25+ scorer to be implemented
 }
 
 impl FiveFactorScorer {
@@ -142,7 +143,7 @@ impl FiveFactorScorer {
             query_embedding,
             intent,
             weights,
-            bm25_scorer: QuickBM25::new(),  // Initialize BM25+ scorer
+            // bm25_scorer: QuickBM25::new(),  // TODO: Initialize BM25+ scorer when implemented
         }
     }
     
@@ -158,7 +159,8 @@ impl FiveFactorScorer {
         }
         
         // 2. BM25+ score with proper term frequency saturation and IDF
-        signals.bm25_score = self.bm25_scorer.score(&self.query, &result.content);
+        // TODO: Implement actual BM25 scorer
+        signals.bm25_score = self.calculate_simple_bm25(&result.content);
         
         // 3. Recency score with exponential decay
         signals.recency_score = self.calculate_recency_score(result.created_at);
@@ -188,13 +190,10 @@ impl FiveFactorScorer {
         result.five_factor_score = five_factor_score;
     }
     
-    /// Calculate recency score with exponential decay
+    /// Calculate recency score using shared time weight function
     fn calculate_recency_score(&self, created_at: chrono::DateTime<chrono::Utc>) -> f32 {
-        let age = chrono::Utc::now().signed_duration_since(created_at);
-        let age_days = age.num_days() as f32;
-        
-        // Exponential decay with 30-day half-life
-        (-age_days / 30.0).exp().max(0.0).min(1.0)
+        // Use shared function with 30-day half-life (30 days * 24 hours)
+        calculate_time_weight(created_at, 30.0 * 24.0)
     }
     
     /// Extract importance from metadata
@@ -238,6 +237,26 @@ impl FiveFactorScorer {
                     .filter_map(|v| v.as_f64().map(|f| f as f32))
                     .collect()
             })
+    }
+    
+    /// Simple BM25-like scoring placeholder
+    fn calculate_simple_bm25(&self, content: &str) -> f32 {
+        // Simple keyword matching until proper BM25 is implemented
+        let query_terms: Vec<&str> = self.query.split_whitespace().collect();
+        let content_lower = content.to_lowercase();
+        let mut matches = 0;
+        
+        for term in &query_terms {
+            if content_lower.contains(&term.to_lowercase()) {
+                matches += 1;
+            }
+        }
+        
+        if query_terms.is_empty() {
+            0.5
+        } else {
+            (matches as f32 / query_terms.len() as f32).min(1.0)
+        }
     }
 }
 

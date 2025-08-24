@@ -547,6 +547,30 @@ lazy_static::lazy_static! {
     static ref GLOBAL_POOL: MemoryPool = MemoryPool::new();
 }
 
+/// Simple vector pool for preprocessor
+pub struct VectorPool {
+    pool: VecDeque<Vec<f32>>,
+}
+
+impl VectorPool {
+    pub fn new() -> Self {
+        Self {
+            pool: VecDeque::new(),
+        }
+    }
+    
+    pub fn get(&mut self) -> Vec<f32> {
+        self.pool.pop_front().unwrap_or_else(|| Vec::with_capacity(1024))
+    }
+    
+    pub fn put(&mut self, mut vec: Vec<f32>) {
+        if self.pool.len() < 100 {
+            vec.clear();
+            self.pool.push_back(vec);
+        }
+    }
+}
+
 /// Initialize global memory pool with pre-allocation
 pub fn initialize_global_pool() -> Result<()> {
     // Force initialization

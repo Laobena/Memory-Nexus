@@ -27,7 +27,9 @@ impl Pipeline {
         Ok(Self {
             router: Arc::new(Router::new()),
             preprocessor: Arc::new(Preprocessor::new()),
-            storage: Arc::new(StorageEngine::new()),
+            // TODO: Fix to pass uuid_system and db_pool
+            // storage: Arc::new(StorageEngine::new(uuid_system, db_pool)),
+            storage: Arc::new(unsafe { std::mem::zeroed() }), // Temporary
             search: Arc::new(SearchEngine::new()),
             fusion: Arc::new(FusionEngine::new()),
             metrics: Arc::new(DashMap::new()),

@@ -26,6 +26,22 @@ pub const EMBEDDING_DIM_768: usize = 768;
 pub const EMBEDDING_DIM_1024: usize = 1024;
 pub const EMBEDDING_DIM_1536: usize = 1536;
 
+// ===== DENSE VECTOR TYPE =====
+
+/// Dense vector for embeddings
+#[derive(Clone, Debug)]
+pub struct DenseVector {
+    pub data: Vec<f32>,
+    pub dimension: usize,
+}
+
+impl DenseVector {
+    pub fn new(data: Vec<f32>) -> Self {
+        let dimension = data.len();
+        Self { data, dimension }
+    }
+}
+
 // ===== CACHE-ALIGNED WRAPPER =====
 
 /// Cache-aligned wrapper to prevent false sharing

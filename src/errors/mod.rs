@@ -11,16 +11,13 @@ use crate::types::ErrorResponse;
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
     #[error("Database error: {0}")]
-    Database(#[from] crate::database::DatabaseError),
+    Database(String),
 
     #[error("Pipeline error: {0}")]
     Pipeline(#[from] crate::pipeline::PipelineError),
 
     #[error("Configuration error: {0}")]
     Config(#[from] crate::config::ConfigError),
-
-    #[error("Sync error: {0}")]
-    Sync(#[from] sync_engine::SyncError),
 
     #[error("Validation error: {message}")]
     Validation { message: String },
@@ -64,7 +61,6 @@ impl AppError {
             AppError::Database(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Pipeline(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::Config(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::Sync(_) => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Validation { .. } => StatusCode::BAD_REQUEST,
             AppError::NotFound { .. } => StatusCode::NOT_FOUND,
             AppError::Timeout { .. } => StatusCode::REQUEST_TIMEOUT,

@@ -5,7 +5,7 @@
 use crate::core::types::*;
 use crate::core::simd_ops::SimdOps;
 use crate::core::hash_utils;
-use crate::optimizations::memory_pool::VectorPool;
+use crate::optimizations::memory_pool::VectorPools;
 use crate::ai::{EmbeddingService, EmbeddingConfig};
 use ahash::{AHashSet, AHasher};
 use once_cell::sync::Lazy;

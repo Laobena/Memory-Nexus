@@ -2,7 +2,9 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use ahash::{AHasher, RandomState};
-use xxhash_rust::xxh3::{xxh3_64, xxh3_128};
+
+#[cfg(feature = "xxhash")]
+use xxhash_rust::xxh3::{xxh3_64 as xxh3_64_impl, xxh3_128 as xxh3_128_impl};
 
 /// Fast string hashing using AHash (best for hash maps)
 #[inline(always)]
@@ -23,13 +25,31 @@ pub fn default_hash(s: &str) -> u64 {
 /// XXHash3 for high-quality, fast hashing
 #[inline(always)]
 pub fn xxhash3_64(s: &str) -> u64 {
-    xxh3_64(s.as_bytes())
+    #[cfg(feature = "xxhash")]
+    {
+        xxh3_64_impl(s.as_bytes())
+    }
+    #[cfg(not(feature = "xxhash"))]
+    {
+        // Fallback to ahash when xxhash is not available
+        ahash_string(s)
+    }
 }
 
 /// XXHash3 128-bit for when you need more bits
 #[inline(always)]
 pub fn xxhash3_128(s: &str) -> u128 {
-    xxh3_128(s.as_bytes())
+    #[cfg(feature = "xxhash")]
+    {
+        xxh3_128_impl(s.as_bytes())
+    }
+    #[cfg(not(feature = "xxhash"))]
+    {
+        // Fallback to two ahash calls for 128-bit
+        let h1 = ahash_string(s);
+        let h2 = ahash_string(&format!("{}_salt", s));
+        ((h1 as u128) << 64) | (h2 as u128)
+    }
 }
 
 /// Generate cache key with prefix
