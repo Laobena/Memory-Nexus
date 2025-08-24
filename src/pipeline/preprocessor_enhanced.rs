@@ -16,6 +16,9 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use serde::{Deserialize, Serialize};
 
+// Standard embedding dimension for mxbai-embed-large
+const EMBEDDING_DIM: usize = 1024;
+
 /// Chunking strategies for different content types
 #[derive(Debug, Clone)]
 pub enum ChunkingStrategy {
@@ -232,6 +235,95 @@ impl ParallelPreprocessor {
 
         let results = futures::future::try_join_all(futures).await?;
         Ok(results)
+    }
+    
+    /// Basic preprocessing for cache-only and smart routing paths
+    pub async fn process_basic(
+        &self,
+        query_info: &crate::pipeline::intelligent_router::QueryInfo,
+    ) -> crate::core::Result<PreprocessedData> {
+        // Use simple chunking for basic processing
+        self.process_with_query_id(
+            &query_info.text, 
+            query_info.id,
+            ChunkingStrategy::Fixed { size: 512 }
+        ).await
+    }
+    
+    /// Full preprocessing for full pipeline path
+    pub async fn process_full(
+        &self,
+        query_info: &crate::pipeline::intelligent_router::QueryInfo,
+    ) -> crate::core::Result<PreprocessedData> {
+        // Use semantic chunking for full processing
+        self.process_with_query_id(
+            &query_info.text,
+            query_info.id,
+            ChunkingStrategy::Semantic { max_tokens: 512, overlap: 50 }
+        ).await
+    }
+    
+    /// Maximum preprocessing with all features for maximum intelligence path
+    pub async fn process_maximum(
+        &self,
+        query_info: &crate::pipeline::intelligent_router::QueryInfo,
+    ) -> crate::core::Result<PreprocessedData> {
+        // Use sliding window for maximum detail
+        self.process_with_query_id(
+            &query_info.text,
+            query_info.id,
+            ChunkingStrategy::Sliding { window: 512, step: 256 }
+        ).await
+    }
+    
+    /// Process text with a specific query_id (internal helper)
+    async fn process_with_query_id(
+        &self,
+        text: &str,
+        query_id: uuid::Uuid,
+        strategy: ChunkingStrategy,
+    ) -> crate::core::Result<PreprocessedData> {
+        let start = std::time::Instant::now();
+        // Use the passed query_id instead of generating a new one
+        
+        // Parallel operations using rayon
+        let (chunks, entities, minhash) = rayon::join(
+            || self.chunker.chunk(text, &strategy),
+            || self.entity_extractor.extract(text),
+            || self.deduplicator.compute_signature(text),
+        );
+
+        // Generate embeddings in parallel (requires async)
+        let embeddings = self.generate_embeddings_parallel(&chunks).await?;
+        
+        // Convert to binary embeddings in parallel with SIMD
+        let binary_embeddings: Vec<BinaryEmbedding> = embeddings
+            .par_iter()
+            .map(|emb| BinaryEmbedding::from_dense(&emb.data.0))
+            .collect();
+
+        let dedup_ratio = self.calculate_dedup_ratio(&minhash);
+        let total_tokens = chunks.iter().map(|c| c.token_count).sum();
+
+        let metadata = ProcessingMetadata {
+            processing_time_ms: start.elapsed().as_millis() as u64,
+            chunk_count: chunks.len(),
+            entity_count: entities.len(),
+            dedup_ratio,
+            language: self.detect_language(text),
+            total_tokens,
+        };
+
+        Ok(PreprocessedData {
+            query_id,
+            chunks,
+            embeddings,
+            binary_embeddings,
+            entities,
+            minhash_signature: minhash,
+            metadata,
+            dedup_ratio,
+        })
     }
 }
 

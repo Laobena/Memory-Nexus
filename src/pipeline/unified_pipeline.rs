@@ -206,7 +206,7 @@ impl UnifiedPipeline {
         }
         
         // Step 1: Analyze query complexity (<0.2ms)
-        let analysis = self.router.analyze(&query).await;
+        let analysis = self.router.analyze(&query, query_id).await;
         self.metrics.record_routing_decision(&analysis.routing_path);
         
         info!("Query {} routed to {:?} path (complexity: {:?}, cache_prob: {:.2})", 
@@ -265,25 +265,25 @@ impl UnifiedPipeline {
     }
     
     /// Execute a specific routing path
-    async fn execute_path(&self, analysis: &QueryAnalysis, query_id: Uuid) -> Result<ProcessingResult> {
+    async fn execute_path(&self, analysis: &QueryAnalysis, query_id: Uuid, user_id: &str) -> Result<ProcessingResult> {
         match &analysis.routing_path {
             RoutingPath::CacheOnly => {
-                self.process_cache_only(analysis, query_id).await
+                self.process_cache_only(analysis, query_id, user_id).await
             }
             RoutingPath::SmartRouting => {
-                self.process_smart_routing(analysis, query_id).await
+                self.process_smart_routing(analysis, query_id, user_id).await
             }
             RoutingPath::FullPipeline => {
-                self.process_full_pipeline(analysis, query_id).await
+                self.process_full_pipeline(analysis, query_id, user_id).await
             }
             RoutingPath::MaximumIntelligence => {
-                self.process_maximum_intelligence(analysis, query_id).await
+                self.process_maximum_intelligence(analysis, query_id, user_id).await
             }
         }
     }
 
     /// Cache-only path (2ms target) - 70% of queries
-    async fn process_cache_only(&self, analysis: &QueryAnalysis, query_id: Uuid) -> Result<ProcessingResult> {
+    async fn process_cache_only(&self, analysis: &QueryAnalysis, query_id: Uuid, user_id: &str) -> Result<ProcessingResult> {
         let start = Instant::now();
         debug!("Query {} using cache-only path", query_id);
         
@@ -309,7 +309,7 @@ impl UnifiedPipeline {
     }
 
     /// Smart routing path (15ms target) - 25% of queries
-    async fn process_smart_routing(&self, analysis: &QueryAnalysis, query_id: Uuid) -> Result<ProcessingResult> {
+    async fn process_smart_routing(&self, analysis: &QueryAnalysis, query_id: Uuid, user_id: &str) -> Result<ProcessingResult> {
         let start = Instant::now();
         debug!("Query {} using smart routing path", query_id);
         
@@ -323,7 +323,7 @@ impl UnifiedPipeline {
         
         // Selective storage (only if novel)
         if analysis.cache_probability < 0.5 {
-            let _ = self.storage.store_selective(&preprocessed, query_id).await;
+            let _ = self.storage.store_selective(&preprocessed, query_id, user_id).await;
         }
         
         // Search with 2 best engines
@@ -352,7 +352,7 @@ impl UnifiedPipeline {
     }
 
     /// Full pipeline path (40ms target) - 4% of queries
-    async fn process_full_pipeline(&self, analysis: &QueryAnalysis, query_id: Uuid) -> Result<ProcessingResult> {
+    async fn process_full_pipeline(&self, analysis: &QueryAnalysis, query_id: Uuid, user_id: &str) -> Result<ProcessingResult> {
         let start = Instant::now();
         debug!("Query {} using full pipeline path", query_id);
         
@@ -365,7 +365,7 @@ impl UnifiedPipeline {
             .context("Full preprocessing failed")?;
         
         // Store in all systems
-        let storage_future = self.storage.store_all(&preprocessed, query_id);
+        let storage_future = self.storage.store_all(&preprocessed, query_id, user_id);
         
         // Search all sources in parallel
         let search_future = self.search.search_all(&preprocessed.embeddings);
@@ -398,7 +398,7 @@ impl UnifiedPipeline {
     }
 
     /// Maximum intelligence path (45ms target) - 1% of queries
-    async fn process_maximum_intelligence(&self, analysis: &QueryAnalysis, query_id: Uuid) -> Result<ProcessingResult> {
+    async fn process_maximum_intelligence(&self, analysis: &QueryAnalysis, query_id: Uuid, user_id: &str) -> Result<ProcessingResult> {
         let start = Instant::now();
         info!("Query {} using MAXIMUM INTELLIGENCE mode", query_id);
         
@@ -413,7 +413,7 @@ impl UnifiedPipeline {
             .context("Maximum preprocessing failed")?;
         
         // Parallel execution of all operations
-        let storage_future = self.storage.store_all_parallel(&preprocessed, query_id);
+        let storage_future = self.storage.store_all_parallel(&preprocessed, query_id, user_id);
         let search_future = self.search.search_all_parallel(&preprocessed.embeddings);
         
         let (storage_result, search_results) = tokio::join!(

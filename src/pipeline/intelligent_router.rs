@@ -286,9 +286,9 @@ impl IntelligentRouter {
 
     /// Analyze query in <0.2ms with all optimizations (embedding generation is async)
     #[inline(always)]
-    pub async fn analyze(&self, query: &str) -> QueryAnalysis {
+    pub async fn analyze(&self, query: &str, query_id: uuid::Uuid) -> QueryAnalysis {
         let start = Instant::now();
-        let query_id = uuid::Uuid::new_v4();
+        // Use the passed query_id instead of generating a new one
         
         // Fast path for very short queries
         if query.len() < 10 {
